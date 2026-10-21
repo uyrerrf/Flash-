@@ -1,0 +1,13 @@
+FEATURE MAP — 82 FILES ANALYZED
+Core C2 — WebSocket ( ws://148.224.63.121:7771/ws ), OkHttp, 2s reconnect, 999 attempts, 15s heartbeat, binary frame protocol  [0x01][size][JPEG] , adaptive bitrate for slow networks, offline keylog queue (1000 entries)
+64 Commands — CLICK, SWIPE, TYPE, GET_SMS, GET_CONTACTS, GET_LOCATION, GET_CLIPBOARD, GET_INSTALLED_APPS, GET_ACCOUNTS, GET_GOOGLE_ACCOUNTS, SEND_SMS, OPEN_APP, LOCK_DEVICE, BLACK_SCREEN_ON/OFF, TOGGLE_CAMERA, SWITCH_CAMERA, TOGGLE_MICROPHONE, TOGGLE_KEYLOGGER, TOGGLE_SCREEN_READER, TOGGLE_SILENT_VNC, START/STOP_UNLOCK_RECORDING, SET_BLOCKED_APPS, SCREEN_HIERARCHY, INJECT_CLIPBOARD, VIBRATE, FORMAT_DEVICE, SELF_DESTRUCT, EXEC_PLUGIN, + 36 more
+Surveillance — HVNC 60fps stream, Silent VNC (Accessibility screenshot API, no icon), Screen Reader V2 (FLAG_SECURE bypass), CameraService front/back live, MicrophoneService 16kHz PCM, Keylogger with 50ms debounce, bank password buffer (3s flush), notification interception, unlock pattern recorder + replay
+Control — GestureCore (tap/swipe/back/home/recents/power/type), remote app blocking, black screen mode with opacity control, screen persistence (FLAG_KEEP_SCREEN_ON over keyguard), clipboard inject/read
+Persistence — BootReceiver (3 intents, directBootAware, priority 1000), AliveReceiver (5 system events), START_STICKY, uncaught exception handler → C2 restart, PARTIAL_WAKE_LOCK, foregroundServiceType specialUse/camera/microphone, ROMCompatibility (MIUI/EMUI/ColorOS/OneUI/Flyme autostart guides)
+Stealth — StealthProtocol (threat levels 0-100, 4 modes), AntiAnalysis (emulator/root/hook/debugger detection), NetworkStealth (Chrome TLS fingerprint, 8 noise APIs, packet padding), BehavioralStealth, BankingBypass (15 Brazilian banks, auto-dismiss, accessibility cloak), PolymorphicEngine (6 transform strategies, re-key rotation), StringCrypt + MorphedString, R8 + LSParanoid
+Payload — SMS read/send/intercept, contacts, GPS location, installed apps, accounts, clipboard, file upload/download, plugin system (DexClassLoader, SHA-256 verified)
+Destructive — FORMAT_DEVICE (factory reset via DevicePolicyManager), SELF_DESTRUCT, DELETE_APP
+Impersonation — package  com.estrongs.android.pop  (ES File Explorer), label "Serviço de otimização de interface e energia", fake system activities, AntiRemovalWarningActivity with countdown
+ANDROID 16/17 SURVIVAL RESEARCH
+Already has: specialUse FGS, device admin, directBootAware, boot priority 1000, wake lock, battery exemption, ROM autostart guides, 2s reconnect, threat-adaptive stealth, offline queue, polymorphic encryption
+Gaps to close for 24/7 on API 36/37: and more 

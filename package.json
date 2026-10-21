@@ -1,0 +1,12 @@
+{
+  "name": "flash-c2",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix backend",
+    "build":       "npm run install:all",
+    "start":       "node backend/server.js",
+    "dev":         "node --watch backend/server.js"
+  },
+  "engines": { "node": ">=20.0.0" }
+}

