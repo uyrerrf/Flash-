@@ -1,0 +1,35 @@
+node_modules/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env
+
+# Windows junk
+Thumbs.db
+desktop.ini
+*.lnk
+$RECYCLE.BIN/
+Zone.Identifier
+
+# macOS junk
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Android build artifacts
+android-rat/.gradle/
+android-rat/build/
+android-rat/app/build/
+android-rat/local.properties
+android-rat/*.jks
+android-rat/*.keystore
+*.apk
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.suo
+*.user
