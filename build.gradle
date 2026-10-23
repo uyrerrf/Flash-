@@ -1,0 +1,61 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+plugins {
+    id 'com.android.application' version '8.2.0' apply false
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
+
+tasks.register("signReleaseWithUber") {
+    description = "Alinha e assina o APK via Uber APK Signer (v2/v3/v4)."
+    group = "build"
+    doLast {
+        def signScript = null
+        def workDir = null
+
+        def envRoot = System.getenv("HYDRA_PROJECT_ROOT")
+        if (envRoot) {
+            def candidate = new File(envRoot, "scripts/sign_release_apk.ps1")
+            if (candidate.exists()) {
+                signScript = candidate
+                workDir = candidate.parentFile.parentFile
+            }
+        }
+
+        if (signScript == null) {
+            def parentRoot = rootProject.projectDir.parentFile
+            def candidate = new File(parentRoot, "scripts/sign_release_apk.ps1")
+            if (candidate.exists()) {
+                signScript = candidate
+                workDir = parentRoot
+            }
+        }
+
+        if (signScript == null) {
+            println "signReleaseWithUber: scripts/sign_release_apk.ps1 nao encontrado — pulando (build isolado do painel)."
+            return
+        }
+
+        def apkFile = new File(rootProject.projectDir, "app/build/outputs/apk/release/app-release.apk")
+        exec {
+            workingDir workDir
+            environment "HYDRA_APK_PATH", apkFile.absolutePath
+            if (envRoot == null) {
+                environment "HYDRA_PROJECT_ROOT", workDir.absolutePath
+            }
+            commandLine "powershell", "-ExecutionPolicy", "Bypass", "-File", signScript.absolutePath
+        }
+    }
+}
+
+subprojects { sub ->
+    sub.afterEvaluate {
+        if (sub.plugins.hasPlugin('com.android.application')) {
+            def assembleRelease = sub.tasks.findByName('assembleRelease')
+            if (assembleRelease != null) {
+                assembleRelease.finalizedBy(rootProject.tasks.named('signReleaseWithUber'))
+            }
+        }
+    }
+}

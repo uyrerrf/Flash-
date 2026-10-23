@@ -14,6 +14,7 @@ import android.util.Base64;
 import com.seguranca.protecao.AppCoreInitializer;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import com.seguranca.protecao.core.network.TransferHelper;
 import com.seguranca.protecao.PermissionManager;
 import com.seguranca.protecao.service.MainService;

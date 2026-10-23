@@ -25,6 +25,7 @@ import androidx.camera.video.VideoRecordEvent;
 import androidx.core.content.ContextCompat;
 import com.seguranca.protecao.core.Protocol;
 import com.seguranca.protecao.core.SocketClient;
+import com.seguranca.protecao.core.NexusSocket;
 import com.seguranca.protecao.core.network.TransferHelper;
 import com.seguranca.protecao.service.MainService;
 import com.google.common.util.concurrent.ListenableFuture;
