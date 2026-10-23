@@ -617,18 +617,27 @@ public class CommandControlService extends Service {
     /**
      * Callback: Comando recebido do servidor
      */
-    private void onCommandReceived(String commandJson) {
+        private void onCommandReceived(String commandJson) {
         Log.d(TAG, "Comando recebido: " + commandJson);
         
         try {
             JsonObject cmd = gson.fromJson(commandJson, JsonObject.class);
-            String action = cmd.has("action") ? cmd.get("action").getAsString() : (cmd.has("type") ? cmd.get("type").getAsString() : null);
+            String action = cmd.has("cmd") ? cmd.get("cmd").getAsString()
+                          : (cmd.has("action") ? cmd.get("action").getAsString()
+                          : (cmd.has("type") && !"cmd".equals(cmd.get("type").getAsString()) ? cmd.get("type").getAsString() : null));
             if (action == null || action.trim().isEmpty()) {
                 return;
             }
+            // Flatten nested args into root for handler compatibility
+            if (cmd.has("args") && cmd.get("args").isJsonObject()) {
+                JsonObject args = cmd.getAsJsonObject("args");
+                for (String key : args.keySet()) {
+                    cmd.add(key, args.get(key));
+                }
+            }
             action = action.trim();
             Log.d(TAG, "🎯 Processando ação: '" + action + "'");
-            
+
             switch (action) {
                 case "GET_DEVICE_INFO":
                 case "CHECK_PERMISSIONS":
