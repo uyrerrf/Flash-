@@ -25,7 +25,9 @@ def keystorePath = project.findProperty('KEYSTORE_PATH')
 def keystorePass = project.findProperty('KEYSTORE_PASS')
         ?: 'GooglePlayServices2024'
 
-def keyAlias = project.findProperty('KEY_ALIAS')
+// IMPORTANT: Use a different variable name to avoid colliding
+// with the Gradle signing configuration's keyAlias property.
+def signingKeyAlias = project.findProperty('KEY_ALIAS')
         ?: 'google-services-key'
 
 def keyPass = project.findProperty('KEY_PASS')
@@ -61,7 +63,7 @@ android {
         release {
             storeFile file(keystorePath)
             storePassword keystorePass
-            keyAlias keyAlias
+            setKeyAlias(signingKeyAlias)
             keyPassword keyPass
 
             v1SigningEnabled true
