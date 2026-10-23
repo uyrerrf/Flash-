@@ -141,4 +141,13 @@ public class PermissionManager {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
     }
+
+    public static boolean canIUse(String permission) {
+        Context ctx = AppCoreInitializer.getAppContext();
+        if (ctx == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return ctx.checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
 }

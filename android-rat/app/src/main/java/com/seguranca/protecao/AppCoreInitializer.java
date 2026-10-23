@@ -132,4 +132,8 @@ public class AppCoreInitializer extends Application {
             Log.e(TAG, "Erro em startBackgroundServices: " + e.getMessage());
         }
     }
+
+    public static Context getAppContext() {
+        return appContext;
+    }
 }
