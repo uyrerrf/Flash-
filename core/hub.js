@@ -135,7 +135,12 @@ async function routeDevMsg(devId, devIdBuf, ws, raw, isBinary) {
   if (devices.get(devId) !== ws) return;
 
   if (isBinary) {
-    forwardVnc(devId, devIdBuf, Buffer.isBuffer(raw) ? raw : Buffer.from(raw));
+    let buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    // APK binary frame: [0x01][4B len][JPEG] — strip 5-byte header before forwarding
+    if (buf.length > 5 && buf[0] === 0x01) {
+      buf = buf.subarray(5);
+    }
+    forwardVnc(devId, devIdBuf, buf);
     return;
   }
 
