@@ -239,7 +239,10 @@ function handleMessage(msg) {
 }
 
 function handleBinaryFrame(buf) {
-  if (S.hvncViewer) S.hvncViewer.pushFrame(buf);
+  if (!S.hvncViewer) return;
+  const dv = new DataView(buf);
+  const ts = dv.getUint32(41) * 0x100000000 + dv.getUint32(45);
+  S.hvncViewer.onFrame(buf.slice(49), ts);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -795,8 +798,7 @@ function startHVNC(id) {
     screenW: info.screen_w || 1080,
     screenH: info.screen_h || 1920,
   });
-
-  sendWS({ type: 'vnc_subscribe', devId: id });
+  sendWS({ type: 'vnc_subscribe', devId: id, quality: 50 });
   const hdr = $('#hvnc-pane-header');
   if (hdr) hdr.textContent = `HVNC — ${deviceName(id)}`;
 }
