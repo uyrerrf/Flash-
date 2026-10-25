@@ -96,8 +96,14 @@ function initWS() {
     onOpen()    { S.connState = 'live'; },
     onClose()   { S.connState = 'off'; },
     onBinary(buf) {
-      // Forward to HVNC viewer if active
-      if (window._hvncViewer) window._hvncViewer.pushFrame(buf);
+      // Server frame: [0x01][devId 36B][len 4B][ts 8B][JPEG]
+      if (!window._hvncViewer) return;
+      const dv = new DataView(buf);
+      const tsHi = dv.getUint32(41);
+      const tsLo = dv.getUint32(45);
+      const serverTs = tsHi * 0x100000000 + tsLo;
+      const jpeg = buf.slice(49); // copy — ArrayBuffer may be pooled
+      window._hvncViewer.onFrame(jpeg, serverTs);
     },
     onMessage(msg) { handleMessage(msg); },
   });

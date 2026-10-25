@@ -354,9 +354,10 @@ class HVNCViewer {
     const r  = this.canvas.getBoundingClientRect();
     const sx = (this.frameW / r.width)  / this._zoom;
     const sy = (this.frameH / r.height) / this._zoom;
+    // Return normalized 0.0-1.0 — APK auto-detects x<=1.0 as vnc_norm
     return {
-      x: Math.max(0, Math.min(this.frameW,  Math.round((clientX - r.left) * sx))),
-      y: Math.max(0, Math.min(this.frameH, Math.round((clientY - r.top)  * sy))),
+      x: Math.max(0, Math.min(1, ((clientX - r.left) * sx) / this.frameW)),
+      y: Math.max(0, Math.min(1, ((clientY - r.top)  * sy) / this.frameH)),
     };
   }
 
