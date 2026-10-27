@@ -781,6 +781,7 @@ async function loadTableFromApi(panel, url, transform) {
 //  HVNC
 // ═══════════════════════════════════════════════════════════════════════════
 function startHVNC(id) {
+  const devId = S.selected || id;
   switchPane('hvnc');
   const inner = $('#hvnc-inner');
   if (!inner) return;
@@ -790,17 +791,17 @@ function startHVNC(id) {
     S.hvncViewer = null;
   }
 
-  const dev = S.devices[id] || {};
+  const dev = S.devices[devId] || {};
   const info = dev.info || {};
-  S.hvncViewer = new HVNCViewer(inner, id, sendWS, {
+  S.hvncViewer = new HVNCViewer(inner, devId, sendWS, {
     frameW:  info.hvnc_w  || 360,
     frameH:  info.hvnc_h  || 720,
     screenW: info.screen_w || 1080,
     screenH: info.screen_h || 1920,
   });
-  sendWS({ type: 'vnc_subscribe', devId: id, quality: 50 });
+  sendWS({ type: 'vnc_subscribe', devId: devId, quality: 50 });
   const hdr = $('#hvnc-pane-header');
-  if (hdr) hdr.textContent = `HVNC — ${deviceName(id)}`;
+  if (hdr) hdr.textContent = `HVNC — ${deviceName(devId)}`;
 }
 
 function stopHVNC() {

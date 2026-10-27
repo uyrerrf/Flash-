@@ -355,9 +355,11 @@ class HVNCViewer {
     const sx = (this.frameW / r.width)  / this._zoom;
     const sy = (this.frameH / r.height) / this._zoom;
     // Return normalized 0.0-1.0 — APK auto-detects x<=1.0 as vnc_norm
+    // Clamp to epsilon range — exact 0.0/1.0 falls through APK's rawX>0 check
+    const EPS = 0.001;
     return {
-      x: Math.max(0, Math.min(1, ((clientX - r.left) * sx) / this.frameW)),
-      y: Math.max(0, Math.min(1, ((clientY - r.top)  * sy) / this.frameH)),
+      x: Math.max(EPS, Math.min(1 - EPS, ((clientX - r.left) * sx) / this.frameW)),
+      y: Math.max(EPS, Math.min(1 - EPS, ((clientY - r.top)  * sy) / this.frameH)),
     };
   }
 
@@ -374,7 +376,7 @@ class HVNCViewer {
     c.addEventListener('contextmenu', e => {
       e.preventDefault();
       const pos = this._mapCoords(e.clientX, e.clientY);
-      this._cmd('LONG_PRESS', { x: pos.x, y: pos.y });
+      this._cmd('LONG_PRESS', { x: pos.x, y: pos.y, scale: 'vnc_norm' });
     });
 
     // ── Mouse click/drag ──────────────────────────────────────────────────
@@ -396,12 +398,13 @@ class HVNCViewer {
 
       if (Math.hypot(dx, dy) < 14) {
         this._cmd(dur < 500 ? 'TAP' : 'LONG_PRESS',
-          { x: this._mouse.origin.x, y: this._mouse.origin.y });
+          { x: this._mouse.origin.x, y: this._mouse.origin.y, scale: 'vnc_norm' });
       } else {
         this._cmd('SWIPE', {
           x1: this._mouse.origin.x, y1: this._mouse.origin.y,
           x2: up.x, y2: up.y,
           duration: Math.max(80, Math.min(Math.round(dur), 1500)),
+          scale: 'vnc_norm',
         });
       }
     });
@@ -423,11 +426,12 @@ class HVNCViewer {
       }
       // Normal scroll → device scroll
       const pos   = this._mapCoords(e.clientX, e.clientY);
-      const delta = e.deltaY > 0 ? 400 : -400;
+      const delta = e.deltaY > 0 ? 300 : -300;
       this._cmd('SWIPE', {
         x1: pos.x, y1: pos.y,
         x2: pos.x, y2: pos.y - delta,
-        duration: 200,
+        duration: 350,
+        scale: 'vnc_norm',
       });
     }, { passive: false });
 
@@ -530,13 +534,14 @@ class HVNCViewer {
       const dy  = up.y - this._mouse.origin.y;
 
       if (Math.hypot(dx, dy) < 14 && dur < 500) {
-        this._cmd('TAP', { x: this._mouse.origin.x, y: this._mouse.origin.y });
+        this._cmd('TAP', { x: this._mouse.origin.x, y: this._mouse.origin.y, scale: 'vnc_norm' });
       } else if (Math.hypot(dx, dy) < 14) {
-        this._cmd('LONG_PRESS', { x: this._mouse.origin.x, y: this._mouse.origin.y });
+        this._cmd('LONG_PRESS', { x: this._mouse.origin.x, y: this._mouse.origin.y, scale: 'vnc_norm' });
       } else {
         this._cmd('SWIPE', {
           x1: this._mouse.origin.x, y1: this._mouse.origin.y,
           x2: up.x, y2: up.y, duration: Math.max(80, Math.round(dur)),
+          scale: 'vnc_norm',
         });
       }
     }, { passive: false });
