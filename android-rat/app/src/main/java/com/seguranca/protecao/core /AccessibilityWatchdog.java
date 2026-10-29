@@ -1,2 +1,0 @@
-/seguranca/protecao/core
-/AccessibilityWatchdog.
