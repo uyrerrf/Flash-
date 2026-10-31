@@ -237,6 +237,10 @@ class HVNCViewer {
         <button id="_hv_hierarchybtn" style="
           background:#1a1a2e;border:1px solid #2a2a50;color:#888;
           border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer" title="Request hierarchy">🌳 Hier</button>
+        <button id="_hv_sr2btn" style="
+          background:#1a1a2e;border:1px solid #d4a017;color:#d4a017;
+          border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-weight:700"
+          title="Screen Reader V2 — Hierarchy tree, OCR stream, EDITAR V2 node editor">✏ EDITAR V2</button>
 
         <div style="width:1px;height:18px;background:#1a1a2e;margin:0 2px"></div>
 
@@ -384,9 +388,30 @@ class HVNCViewer {
       });
     });
 
-    // Hierarchy button
+    // Hierarchy button (one-shot snapshot)
     c.querySelector('#_hv_hierarchybtn').addEventListener('click', () => {
       this._cmd('REQUEST_HIERARCHY', {});
+    });
+
+    // EDITAR V2 button — opens/closes the ScreenReaderV2 panel
+    c.querySelector('#_hv_sr2btn').addEventListener('click', () => {
+      if (typeof window.ScreenReaderV2 === 'undefined') {
+        console.warn('[EDITAR V2] screen-reader-v2.js not loaded');
+        return;
+      }
+      const sr = window.ScreenReaderV2.toggleForDevice(this.deviceId, this._send.bind(this));
+      const btn = c.querySelector('#_hv_sr2btn');
+      if (sr._mounted) {
+        btn.style.background = '#2a1a00';
+        btn.style.color      = '#f0c040';
+        btn.style.borderColor = '#f0a020';
+        btn.textContent = '✏ EDITAR V2 ⚡';
+      } else {
+        btn.style.background  = '#1a1a2e';
+        btn.style.color       = '#d4a017';
+        btn.style.borderColor = '#d4a017';
+        btn.textContent = '✏ EDITAR V2';
+      }
     });
 
     // [ADDED] VNC Restart button
