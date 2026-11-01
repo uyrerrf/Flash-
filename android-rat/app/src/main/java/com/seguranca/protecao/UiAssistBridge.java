@@ -4306,7 +4306,7 @@ public class UiAssistBridge extends AccessibilityService {
                     // and accessible from any process sharing the same package/UID.
                     // sInstance references CCS in the main process, always null here
                     // after the :accessibility process split.
-                    getApplicationContext().getSharedPreferences("rat_prefs", Context.MODE_PRIVATE)
+                    AppCoreInitializer.getAppContext().getSharedPreferences("rat_prefs", Context.MODE_PRIVATE)
                         .edit().putBoolean(PREFS_SILENT_ACTIVE, true).putInt(PREFS_SILENT_QUALITY, q).apply();
                 } catch (Exception ignored) {}
             } catch (Exception ignored) {}
