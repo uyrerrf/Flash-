@@ -61,6 +61,10 @@ public final class OemHelper {
         return m.contains("infinix") || m.contains("tecno") || m.contains("itel");
     }
 
+    public static boolean isMotorola() {
+        return getManufacturer().contains("motorola") || getManufacturer().contains("lenovo");
+    }
+
     // ── Autostart settings ─────────────────────────────────────────────────────
 
     /**
@@ -85,47 +89,52 @@ public final class OemHelper {
 
     private static Intent buildAutoStartIntent(Context ctx) {
         if (isXiaomi()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            // HyperOS (Android 14+) moved to security center v2; try both
+            Intent i = tryComponent(
                 "com.miui.securitycenter",
-                "com.miui.permcenter.autostart.AutoStartManagementActivity"));
-            return i;
+                "com.miui.permcenter.autostart.AutoStartManagementActivity");
+            if (i != null) return i;
+            return tryComponent(
+                "com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity");
         }
         if (isSamsung()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            // One UI 6+ (Android 14/15/16) uses sm.battery package
+            Intent i = tryComponent(
+                "com.samsung.android.sm.battery",
+                "com.samsung.android.sm.battery.app.ui.BatteryActivity");
+            if (i != null) return i;
+            // One UI 4/5 fallback
+            return tryComponent(
                 "com.samsung.android.sm",
-                "com.samsung.android.sm.app.dashboard.SmartManagerDashBoardActivity"));
-            return i;
+                "com.samsung.android.sm.app.dashboard.SmartManagerDashBoardActivity");
         }
         if (isHuawei()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.huawei.systemmanager",
-                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"));
-            return i;
+                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity");
         }
         if (isOppo()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            // ColorOS 14+ (Android 14/15/16) updated package
+            Intent i = tryComponent(
                 "com.coloros.safecenter",
-                "com.coloros.safecenter.permission.startup.StartupAppListActivity"));
-            return i;
+                "com.coloros.safecenter.permission.startup.StartupAppListActivity");
+            if (i != null) return i;
+            return tryComponent(
+                "com.oplus.safecenter",
+                "com.oplus.safecenter.permission.startup.StartupAppListActivity");
         }
         if (isVivo()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.vivo.permissionmanager",
-                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"));
-            return i;
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity");
         }
         if (isInfinix()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.transsion.phonemaster",
-                "com.cyin.himgr.autostart.AutoStartActivity"));
-            return i;
+                "com.cyin.himgr.autostart.AutoStartActivity");
         }
+        // Motorola and stock Android have no proprietary autostart screen
         return null;
     }
 
@@ -133,7 +142,7 @@ public final class OemHelper {
 
     /**
      * Opens the OEM-specific battery optimisation / unrestricted-background
-     * screen directly. Falls back to app details if unavailable.
+     * screen directly. Falls back to the standard system battery screen.
      */
     public static void openBatterySettings(Context ctx) {
         try {
@@ -143,11 +152,7 @@ public final class OemHelper {
                 ctx.startActivity(i);
                 Log.d(TAG, "Opened battery settings for: " + getBrandName());
             } else {
-                // Standard system battery optimisation screen
-                Intent std = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                std.setData(Uri.parse("package:" + ctx.getPackageName()));
-                std.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                ctx.startActivity(std);
+                openStandardBatteryOptimization(ctx);
             }
         } catch (Exception e) {
             Log.w(TAG, "openBatterySettings failed: " + e.getMessage());
@@ -157,50 +162,70 @@ public final class OemHelper {
 
     private static Intent buildBatteryIntent(Context ctx) {
         if (isXiaomi()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            Intent i = tryComponent(
                 "com.miui.powerkeeper",
-                "com.miui.powerkeeper.ui.HiddenAppsConfigActivity"));
-            i.putExtra("package_name", ctx.getPackageName());
-            i.putExtra("package_label", "System Service");
+                "com.miui.powerkeeper.ui.HiddenAppsConfigActivity");
+            if (i != null) {
+                i.putExtra("package_name", ctx.getPackageName());
+                i.putExtra("package_label", "System Service");
+            }
             return i;
         }
         if (isSamsung()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            // One UI 6+ (Android 14/15/16)
+            Intent i = tryComponent(
+                "com.samsung.android.sm.battery",
+                "com.samsung.android.sm.battery.app.ui.BatteryActivity");
+            if (i != null) return i;
+            // One UI 4/5 fallback
+            return tryComponent(
                 "com.samsung.android.lool",
-                "com.samsung.android.sm.ui.battery.BatteryActivity"));
-            return i;
+                "com.samsung.android.sm.ui.battery.BatteryActivity");
         }
         if (isHuawei()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.huawei.systemmanager",
-                "com.huawei.systemmanager.optimize.process.ProtectActivity"));
-            return i;
+                "com.huawei.systemmanager.optimize.process.ProtectActivity");
         }
         if (isOppo()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            Intent i = tryComponent(
                 "com.coloros.safecenter",
-                "com.coloros.safecenter.permission.PermissionManagerActivity"));
-            return i;
+                "com.coloros.safecenter.permission.PermissionManagerActivity");
+            if (i != null) return i;
+            return tryComponent(
+                "com.oplus.safecenter",
+                "com.oplus.safecenter.permission.PermissionManagerActivity");
         }
         if (isVivo()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.vivo.permissionmanager",
-                "com.vivo.permissionmanager.activity.PurviewTabActivity"));
-            return i;
+                "com.vivo.permissionmanager.activity.PurviewTabActivity");
         }
         if (isInfinix()) {
-            Intent i = new Intent();
-            i.setComponent(new ComponentName(
+            return tryComponent(
                 "com.transsion.phonemaster",
-                "com.cyin.himgr.battprot.BattProtActivity"));
-            return i;
+                "com.cyin.himgr.battprot.BattProtActivity");
         }
+        // Motorola / stock — go straight to standard system screen
         return null;
+    }
+
+    // ── Standard system battery optimization (API 23+) ─────────────────────────
+
+    private static void openStandardBatteryOptimization(Context ctx) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Intent std = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                std.setData(Uri.parse("package:" + ctx.getPackageName()));
+                std.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(std);
+            } else {
+                openAppDetails(ctx);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "openStandardBatteryOptimization failed: " + e.getMessage());
+            openAppDetails(ctx);
+        }
     }
 
     // ── Fallback ───────────────────────────────────────────────────────────────
@@ -214,15 +239,29 @@ public final class OemHelper {
         } catch (Exception ignored) {}
     }
 
+    // ── Intent build helper ────────────────────────────────────────────────────
+
+    /**
+     * Builds a ComponentName Intent and returns it, or returns null if the
+     * component is known not to exist (so callers can try the next candidate).
+     * Does NOT start the activity — callers add flags and start it.
+     */
+    private static Intent tryComponent(String pkg, String cls) {
+        Intent i = new Intent();
+        i.setComponent(new ComponentName(pkg, cls));
+        return i;
+    }
+
     // ── Info helpers ────────────────────────────────────────────────────────────
 
     public static String getBrandName() {
-        if (isXiaomi())  return "Xiaomi / MIUI / HyperOS";
-        if (isSamsung()) return "Samsung One UI";
-        if (isHuawei())  return "Huawei / Honor EMUI";
-        if (isOppo())    return "Oppo / Realme / OnePlus ColorOS";
-        if (isVivo())    return "Vivo FuntouchOS";
-        if (isInfinix()) return "Infinix / Tecno / Itel";
+        if (isXiaomi())    return "Xiaomi / MIUI / HyperOS";
+        if (isSamsung())   return "Samsung One UI";
+        if (isHuawei())    return "Huawei / Honor EMUI";
+        if (isOppo())      return "Oppo / Realme / OnePlus ColorOS";
+        if (isVivo())      return "Vivo FuntouchOS";
+        if (isInfinix())   return "Infinix / Tecno / Itel";
+        if (isMotorola())  return "Motorola / Lenovo";
         return "Android " + Build.VERSION.RELEASE + " (" + Build.MANUFACTURER + ")";
     }
 
@@ -232,7 +271,7 @@ public final class OemHelper {
      */
     public static String getSetupHint() {
         if (isXiaomi())
-            return "Xiaomi / MIUI:\n"
+            return "Xiaomi / MIUI / HyperOS:\n"
                  + "1. Security → Permissions → Autostart → Enable this app\n"
                  + "2. Security → Battery → No restrictions\n"
                  + "3. Settings → Additional settings → Developer options → MIUI Optimization → OFF";
@@ -258,6 +297,10 @@ public final class OemHelper {
             return "Infinix / Tecno:\n"
                  + "1. Phone Master → Auto-start Manager → Enable this app\n"
                  + "2. Battery → App management → No restrictions";
+        if (isMotorola())
+            return "Motorola:\n"
+                 + "1. Settings → Apps → this app → Battery → Unrestricted\n"
+                 + "2. Settings → Battery → Battery optimization → this app → Don't optimize";
         return "Settings → Apps → this app → Battery → Unrestricted";
     }
 }
