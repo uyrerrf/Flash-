@@ -235,6 +235,19 @@ function handleMessage(msg) {
       updateHeaderStats(msg);
       break;
     }
+
+    // ── Ly Screen Reader — accessibility tree ─────────────────────────────
+    case 'screen_hierarchy': {
+      // Always try the active hvncViewer first
+      if (S.hvncViewer && typeof S.hvncViewer.onHierarchy === 'function') {
+        S.hvncViewer.onHierarchy(msg.data || msg);
+      }
+      // Also dispatch as a DOM event so any other subscriber can listen
+      document.dispatchEvent(new CustomEvent('ly:hierarchy', {
+        detail: { id: msg.id, data: msg.data || msg }
+      }));
+      break;
+    }
   }
 }
 
