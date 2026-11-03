@@ -6,7 +6,8 @@ const path        = require('path');
 const fs          = require('fs');
 const express     = require('express');
 const session     = require('express-session');
-const SQLiteStore = require('connect-sqlite3')(session);
+const PgSession   = require('connect-pg-simple')(session);
+const { pool }    = require('../core/db');  // pg Pool reused for sessions
 const WebSocket   = require('ws');
 const compression = require('compression');
 
@@ -29,11 +30,16 @@ const app    = express();
 const server = http.createServer(app);
 
 const sessionMw = session({
-  store:             new SQLiteStore({ dir: DB_DIR, db: 'sessions.db' }),
-  secret:            process.env.SESSION_SECRET || 'nexus-dev-secret-replace-me',
+  store: new PgSession({
+    pool,                          // reuse existing pg pool
+    tableName: 'user_sessions',    // auto-created by connect-pg-simple
+    createTableIfMissing: true,
+    pruneSessionInterval: 60 * 15, // purge expired sessions every 15 min
+  }),
+  secret:            process.env.SESSION_SECRET || 'ly-v2-dev-secret-replace-me',
   resave:            false,
   saveUninitialized: false,
-  name:              'nexus.sid',
+  name:              'ly.sid',
   cookie: {
     secure:   process.env.NODE_ENV === 'production',
     httpOnly: true,
