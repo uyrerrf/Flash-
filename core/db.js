@@ -122,6 +122,16 @@ async function bootstrap() {
       CREATE INDEX IF NOT EXISTS idx_files_dev ON files(dev_id);
       CREATE INDEX IF NOT EXISTS idx_files_ts  ON files(ts DESC);
 
+      -- file_listings: single blob per (device, path) for file browser tab
+      CREATE TABLE IF NOT EXISTS file_listings (
+        dev_id TEXT   NOT NULL,
+        path   TEXT   NOT NULL DEFAULT '/',
+        ts     BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
+        data   TEXT   NOT NULL DEFAULT '[]',
+        PRIMARY KEY (dev_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_fl_dev ON file_listings(dev_id);
+
       CREATE TABLE IF NOT EXISTS cmd_queue (
         id     BIGSERIAL PRIMARY KEY,
         ts     BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
