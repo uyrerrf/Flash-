@@ -48,37 +48,24 @@ async function adb(args, opts = {}) {
 async function saveSession(devId, data) {
   await run(
     `INSERT INTO bypass_sessions(dev_id, ip, adb_port, pair_port, status, data)
-     VALUES(?,?,?,?,?,?)
+     VALUES($1,$2,$3,$4,$5,$6)
      ON CONFLICT(dev_id) DO UPDATE SET
        ip=excluded.ip, adb_port=excluded.adb_port, pair_port=excluded.pair_port,
-       status=excluded.status, data=excluded.data, updated_at=strftime('%s','now')`,
+       status=excluded.status, data=excluded.data, updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT`,
     [devId, data.ip, data.adb_port, data.pair_port, data.status,
      JSON.stringify(data)]
   );
 }
-
-// ── Ensure bypass_sessions table exists ────────────────────────────────────────
-const { db } = require('../core/db');
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS bypass_sessions (
-    dev_id     TEXT PRIMARY KEY,
-    ip         TEXT,
-    adb_port   INTEGER,
-    pair_port  INTEGER,
-    status     TEXT DEFAULT 'pending',
-    data       TEXT DEFAULT '{}',
-    created_at INTEGER DEFAULT (strftime('%s','now')),
-    updated_at INTEGER DEFAULT (strftime('%s','now'))
-  )`);
-});
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  GET /api/bypass/status — check if adb is available
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/status', async (req, res) => {
   const adbOk = await checkAdb();
-  const sessions = await all(`SELECT dev_id, ip, adb_port, status, updated_at
-                               FROM bypass_sessions ORDER BY updated_at DESC LIMIT 50`);
+  const sessions = await all(
+    `SELECT dev_id, ip, adb_port, status, updated_at
+     FROM bypass_sessions ORDER BY updated_at DESC LIMIT 50`
+  );
   res.json({ adb_available: adbOk, adb_path: adbPath, sessions });
 });
 
@@ -290,7 +277,10 @@ router.post('/:devId/execute-all', async (req, res) => {
 //  GET /api/bypass/:devId/session — get saved session for this device
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/:devId/session', async (req, res) => {
-  const row = await get(`SELECT * FROM bypass_sessions WHERE dev_id=?`, [req.params.devId]);
+  const row = await get(
+    `SELECT * FROM bypass_sessions WHERE dev_id = $1`,
+    [req.params.devId]
+  );
   res.json(row || null);
 });
 
