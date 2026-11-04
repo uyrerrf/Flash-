@@ -135,20 +135,23 @@ class LyReader {
     this._updateStatus(hier);
   }
 
-  /** Start continuous hierarchy polling via hub-side timer (efficient). */
+  /** Start continuous client-side hierarchy polling. */
   startPolling(intervalMs = 700) {
     if (this._polling) return;
     this._polling = true;
-    // Tell hub to start server-side polling — single WS packet every intervalMs
-    this._send({ type: 'hierarchy_subscribe', devId: this._deviceId, interval: intervalMs });
+    this._requestHierarchy();                        // fire immediately
+    this._pollTimer = setInterval(() => {
+      if (this._polling) this._requestHierarchy();
+    }, intervalMs);
   }
 
-  /** Stop hub-side hierarchy polling. */
+  /** Stop polling. */
   stopPolling() {
     if (!this._polling) return;
     this._polling = false;
+    clearInterval(this._pollTimer);
+    this._pollTimer = null;
     clearTimeout(this._refreshTimer);
-    this._send({ type: 'hierarchy_unsubscribe', devId: this._deviceId });
   }
 
   /** Clean up everything. */
@@ -700,6 +703,8 @@ class LyReader {
   }
 
   _requestHierarchy() {
+    // Standard cmd path — same format the original Hier button uses,
+    // works with every hub version without any server changes.
     this._send({ type: 'cmd', target: this._deviceId, cmd: 'REQUEST_HIERARCHY', args: {} });
   }
 
