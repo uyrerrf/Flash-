@@ -124,8 +124,9 @@ router.post('/auto-deploy/:dev_id', async (req, res) => {
       args: { package: ov.package_name, html: ov.html, name: ov.name }
     }));
     await run(
-      `INSERT OR REPLACE INTO overlay_deployments(dev_id,overlay_id,package,status)
-       VALUES(?,?,?,?)`, [dev_id, ov.id, ov.package_name, 'armed']
+      `INSERT INTO overlay_deployments(dev_id,overlay_id,package,status) VALUES(?,?,?,?)
+       ON CONFLICT(dev_id,overlay_id) DO UPDATE SET package=excluded.package, status=excluded.status`,
+      [dev_id, ov.id, ov.package_name, 'armed']
     );
     deployed++;
   }
