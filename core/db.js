@@ -242,10 +242,17 @@ function convertSQL(sql) {
 // We do a lightweight string replace on the rare places these appear.
 function normalizeSql(sql) {
   return sql
+    // SQLite INSERT OR REPLACE → standard INSERT ... ON CONFLICT DO NOTHING
+    // (specific ON CONFLICT DO UPDATE clauses are written per-query in hub/routes)
+    .replace(/INSERT\s+OR\s+REPLACE\s+INTO/gi, 'INSERT INTO')
     .replace(/strftime\('%s',\s*'now'\)/gi, `EXTRACT(EPOCH FROM NOW())::BIGINT`)
     .replace(/AUTOINCREMENT/gi, '')   // pg uses SERIAL/BIGSERIAL; already handled in schema
     .replace(/INTEGER PRIMARY KEY(?!\s+AUTOINCREMENT)/gi, 'BIGSERIAL PRIMARY KEY');
 }
+
+// Tables that have no BIGSERIAL/SERIAL 'id' column — RETURNING id would throw.
+// Covers every table whose PK is NOT a column named 'id'.
+const NO_ID_TABLES = /\bINTO\s+(device_sms|device_contacts|device_apps|device_accounts|device_calls|file_listings|app_detections)\b/i;
 
 // ── Promisified helpers (same signature as SQLite version) ───────────────────
 
@@ -256,9 +263,12 @@ function normalizeSql(sql) {
  */
 const run = async (sql, params = []) => {
   const pgSql = convertSQL(normalizeSql(sql));
-  // For INSERT … RETURNING id — capture the generated id
-  const isInsert = /^\s*INSERT/i.test(pgSql);
-  const query = isInsert && !pgSql.includes('RETURNING')
+  // Append RETURNING id only for INSERTs into tables that actually have an 'id' column.
+  // Tables with composite or non-id PKs (device_sms, device_apps, app_detections, etc.)
+  // would throw "column id does not exist" if we blindly appended RETURNING id.
+  const isInsert    = /^\s*INSERT/i.test(pgSql);
+  const hasNoIdCol  = NO_ID_TABLES.test(pgSql);
+  const query = isInsert && !pgSql.includes('RETURNING') && !hasNoIdCol
     ? pgSql + ' RETURNING id'
     : pgSql;
   const result = await pool.query(query, params);
