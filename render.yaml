@@ -1,45 +1,29 @@
-# render.yaml — Ly v2 deployment config
-# Docs: https://render.com/docs/blueprint-spec
-
 services:
-  # ── Web service (Node.js) ──────────────────────────────────────────────────
-  - type: web
-    name: ly-v2
-    runtime: node
-    plan: free                      # change to 'starter' to avoid spin-down
-    region: frankfurt               # or ohio / oregon / singapore
 
-    buildCommand: npm install --omit=dev --no-audit
-    startCommand: node server/index.js
+- type: web
+  name: nexus-c2
+  env: node
+  plan: free
+  buildCommand: npm install --omit=dev --no-audit
+  startCommand: node server/index.js
+  healthCheckPath: /health
+  envVars:
+  - key: NODE_ENV
+    value: production
+  - key: PORT
+    value: 10000
+  - key: DATABASE_URL
+    fromDatabase:
+      name: nexus-db
+      property: connectionString
+  - key: SESSION_SECRET
+    generateValue: true
+  - key: ADMIN_USER
+    sync: false        # ← prompts during blueprint deploy
+  - key: ADMIN_PASS
+    sync: false        # ← prompts during blueprint deploy
 
-    # Health check — Render pings this to decide if the deploy succeeded
-    healthCheckPath: /
-
-    envVars:
-      - key: NODE_ENV
-        value: production
-
-      - key: PORT
-        value: 3000
-
-      # SESSION_SECRET — override in Render dashboard with a random 64-char string
-      - key: SESSION_SECRET
-        generateValue: true         # Render generates a random value on first deploy
-
-      # DATABASE_URL is injected automatically by Render when the DB below is linked
-      - key: DATABASE_URL
-        fromDatabase:
-          name: ly-v2-db
-          property: connectionString
-
-    # ── Auto-deploy on push ──────────────────────────────────────────────────
-    autoDeploy: true
-
-# ── PostgreSQL database ──────────────────────────────────────────────────────
 databases:
-  - name: ly-v2-db
-    plan: free                      # 1 GB free tier on Render
-    databaseName: ly_v2
-    user: ly_v2_user
-    region: frankfurt               # must match the web service region
-    
+- name: nexus-db
+  plan: free
+  
