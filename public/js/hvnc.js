@@ -594,6 +594,39 @@ class HVNCViewer {
 
   _drawOverlay() {
     this._sparkline.draw(this.ctx, 4, 4);
+    if (this._cursor) this._drawCursor();
+  }
+
+  _drawCursor() {
+    const { x, y } = this._cursor;
+    const cx = x * this.canvas.width;
+    const cy = y * this.canvas.height;
+    const c  = this.ctx;
+    c.save();
+    // Outer crosshair
+    c.strokeStyle = 'rgba(255,60,60,0.85)';
+    c.lineWidth   = 1.5;
+    c.beginPath();
+    c.moveTo(cx - 11, cy); c.lineTo(cx - 4, cy);
+    c.moveTo(cx + 4,  cy); c.lineTo(cx + 11, cy);
+    c.moveTo(cx, cy - 11); c.lineTo(cx, cy - 4);
+    c.moveTo(cx, cy + 4);  c.lineTo(cx, cy + 11);
+    c.stroke();
+    // Inner dot ring
+    c.beginPath();
+    c.arc(cx, cy, 3, 0, Math.PI * 2);
+    c.strokeStyle = 'rgba(255,100,100,0.7)';
+    c.lineWidth   = 1;
+    c.stroke();
+    // Flash when mouse down
+    if (this._mouse.down) {
+      c.beginPath();
+      c.arc(cx, cy, 10, 0, Math.PI * 2);
+      c.strokeStyle = 'rgba(255,80,80,0.5)';
+      c.lineWidth   = 1.5;
+      c.stroke();
+    }
+    c.restore();
   }
 
   _drawPlaceholder() {
@@ -683,6 +716,16 @@ class HVNCViewer {
     // 0.03 = 3% of screen dimension, which correctly distinguishes intentional
     // drags from tap jitter.
     const SWIPE_THRESHOLD = 0.03;
+
+    // Live cursor tracking — position shown as red crosshair overlay
+    this._cursor     = null;
+    this._cursorDown = false;
+    c.addEventListener('mousemove', e => {
+      this._cursor = this._mapCoords(e.clientX, e.clientY);
+    });
+    c.addEventListener('mouseleave', () => {
+      this._cursor = null;
+    });
 
     c.addEventListener('contextmenu', e => {
       e.preventDefault();
