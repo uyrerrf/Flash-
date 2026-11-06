@@ -17,9 +17,7 @@ if (!skipParanoid) {
 }
 
 // ── CI-injectable properties ─────────────────────────────────────────────────
-def serverUrl = project.findProperty('SERVER_URL') ?: 'wss://flash-dashboard-7f1r.onrender.com/ws/device
-'
-
+def serverUrl = project.findProperty('SERVER_URL') ?: 'wss://flash-dashboard-7f1r.onrender.com/ws/device'
 def keystorePath = project.findProperty('KEYSTORE_PATH')
         ?: '../google-services-release.jks'
 
