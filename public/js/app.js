@@ -237,6 +237,7 @@ function handleMessage(msg) {
       break;
     case 'screen_hierarchy':
       document.dispatchEvent(new CustomEvent('nx:hierarchy', { detail: msg }));
+      if (window._hvncViewer?.onHierarchy) window._hvncViewer.onHierarchy(msg.data || msg);
       break;
     case 'studio_form_data':
       feedAdd('🎯', msg.id, `Form captured (${msg.project_id || '?'})`, 'yellow');
