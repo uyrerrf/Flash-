@@ -140,6 +140,8 @@ router.post('/devices/:id/refresh/:type', async (req, res) => {
     apps:     'GET_INSTALLED_APPS',
     accounts: 'GET_ACCOUNTS',
     location: 'GET_LOCATION',
+    calls:    'GET_CALL_LOGS',
+    files:    'GET_FILE_LIST',
   };
   const cmd = cmdMap[req.params.type];
   if (!cmd) return res.status(400).json({ error: 'Unknown type' });
