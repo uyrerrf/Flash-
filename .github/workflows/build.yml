@@ -27,6 +27,9 @@ on:
         description: 'Or upload logo PNG (overrides URL if both provided)'
         required: false
         type: file
+      device_secret:
+        description: 'Device auth secret (x-device-secret header) — falls back to DEVICE_SECRET repo secret'
+        required: false
       build_type:
         description: 'Build type'
         required: false
@@ -152,6 +155,19 @@ jobs:
           [ -z "$URL" ] && URL="wss://localhost:3000"
           echo "url=$URL" >> "$GITHUB_OUTPUT"
 
+      # ── 6b. Resolve DEVICE_SECRET ────────────────────────────────────────────
+      - name: Resolve DEVICE_SECRET
+        id: dsecret
+        run: |
+          SECRET="${{ github.event.inputs.device_secret }}"
+          [ -z "$SECRET" ] && SECRET="${{ secrets.DEVICE_SECRET }}"
+          if [ -z "$SECRET" ]; then
+            echo "::warning::DEVICE_SECRET not set — APK will use the insecure default. Set the DEVICE_SECRET repo secret."
+            SECRET="dev-device-secret-replace-me"
+          fi
+          echo "::add-mask::$SECRET"
+          echo "value=$SECRET" >> "$GITHUB_OUTPUT"
+
       # ══════════════════════════════════════════════════════════════════════════
       #  SIGNING (only for release-signed build type)
       # ══════════════════════════════════════════════════════════════════════════
@@ -217,6 +233,7 @@ jobs:
 
           ./gradlew "$TASK" \
             -PSERVER_URL="${{ steps.server.outputs.url }}" \
+            -PDEVICE_SECRET="${{ steps.dsecret.outputs.value }}" \
             -PSKIP_PARANOID=true \
             $EXTRA_FLAGS \
             --no-daemon \
@@ -262,6 +279,9 @@ jobs:
           echo "| Size | ${{ steps.apk.outputs.size }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SHA-256 | \`${{ steps.apk.outputs.sha256 }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "| SERVER_URL | \`${{ steps.server.outputs.url }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          DS_SET="⚠️ default (insecure)"
+          [ "${{ steps.dsecret.outputs.value }}" != "dev-device-secret-replace-me" ] && DS_SET="✅ set"
+          echo "| DEVICE_SECRET | $DS_SET |" >> "$GITHUB_STEP_SUMMARY"
           
           # Logo source tracking
           LOGO_SRC="Default"
