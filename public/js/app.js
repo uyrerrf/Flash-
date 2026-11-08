@@ -3,6 +3,13 @@
 //  Nexus C2 — Dashboard v7  ·  [K] rebuild
 //  Fixes: FilesTab, Fetch buttons, HVNC Start/Stop, V2/DUPLO binary routing
 // ═══════════════════════════════════════════════════════════════════════════
+
+// High-frequency / internal commands — never show in feed or as toasts
+const SILENT_UI_CMDS = new Set([
+  'REQUEST_HIERARCHY',
+  'PING', 'PONG', 'HEARTBEAT',
+  'GET_FRAME', 'VNC_FRAME', 'SILENT_FRAME',
+]);
 const {
   createApp, reactive, ref, computed, watch,
   onMounted, onUnmounted, nextTick
@@ -251,8 +258,12 @@ function handleMessage(msg) {
     case 'bypass_status': case 'bypass_update':
       document.dispatchEvent(new CustomEvent('nx:bypass', { detail: msg }));
       break;
-    case 'cmd_queued':   toast(`Queued: ${msg.cmd}`, 'info'); break;
-    case 'cmd_ack':      if (msg.delivered) toast(`→ ${msg.cmd}`, 'success'); break;
+    case 'cmd_queued':
+      if (!SILENT_UI_CMDS.has(msg.cmd)) toast(`Queued: ${msg.cmd}`, 'info');
+      break;
+    case 'cmd_ack':
+      if (msg.delivered && !SILENT_UI_CMDS.has(msg.cmd)) toast(`→ ${msg.cmd}`, 'success');
+      break;
     case 'broadcast_ack':toast(`Broadcast "${msg.cmd}" → ${msg.sent} device(s)`, 'success'); break;
     case 'overlays_auto_armed':
       feedAdd('🎭', msg.dev_id, `${msg.count} overlay(s) armed`); break;

@@ -352,7 +352,7 @@ class LyReader {
   }
 
   _scheduleRefresh(ms=400){clearTimeout(this._refreshTimer);this._refreshTimer=setTimeout(()=>this._requestHierarchy(),ms);}
-  _requestHierarchy(){this._send({type:'cmd',target:this._deviceId,cmd:'REQUEST_HIERARCHY',args:{}});}
+  _requestHierarchy(){this._send({type:'cmd',target:this._deviceId,cmd:'REQUEST_HIERARCHY',args:{},silent:true});}
 
   _updateStatus(root){
     let n=0; const count=nd=>{if(!nd)return;n++;(nd.children||[]).forEach(count);}; count(root);
