@@ -2,22 +2,30 @@ plugins {
     id 'com.android.application'
 }
 
-// ── LSParanoid (optional obfuscation) ────────────────────────────────────────
-def skipParanoid = project.findProperty('SKIP_PARANOID') != 'false'
+// ── LSParanoid string obfuscation ─────────────────────────────────────────────
+// Set SKIP_PARANOID=true in gradle.properties only for local debug builds.
+// A release build with LSParanoid missing is a hard failure — IS_OBFUSCATED=true
+// would be a lie and the APK would ship with readable string literals.
+def skipParanoid = project.findProperty('SKIP_PARANOID') == 'true'
 
 if (!skipParanoid) {
     try {
         apply plugin: 'org.lsposed.lsparanoid'
         println '[OK] LSParanoid enabled.'
     } catch (Exception e) {
-        println '[WARN] LSParanoid unavailable: ' + e.message
+        throw new GradleException(
+            '[FATAL] LSParanoid plugin unavailable but SKIP_PARANOID != true. ' +
+            'Either add the plugin to your classpath or set SKIP_PARANOID=true for debug builds. ' +
+            'Error: ' + e.message
+        )
     }
 } else {
     println '[INFO] LSParanoid skipped (SKIP_PARANOID=true).'
 }
 
 // ── CI-injectable properties ─────────────────────────────────────────────────
-def serverUrl = project.findProperty('SERVER_URL') ?: 'wss://flash-dashboard-7f1r.onrender.com/ws/device'
+def serverUrl      = project.findProperty('SERVER_URL')      ?: 'wss://flash-dashboard-7f1r.onrender.com/ws/device'
+def deviceSecret   = project.findProperty('DEVICE_SECRET')   ?: 'dev-device-secret-replace-me'
 def keystorePath = project.findProperty('KEYSTORE_PATH')
         ?: '../google-services-release.jks'
 
@@ -55,7 +63,8 @@ android {
         resourceConfigurations += ['pt', 'en']
 
         buildConfigField 'boolean', 'IS_OBFUSCATED', 'true'
-        buildConfigField 'String', 'SERVER_URL', "\"${serverUrl}\""
+        buildConfigField 'String',  'SERVER_URL',    "\"${serverUrl}\""
+        buildConfigField 'String',  'DEVICE_SECRET', "\"${deviceSecret}\""
     }
 
     signingConfigs {
