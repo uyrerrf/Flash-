@@ -119,8 +119,7 @@ app.get('/', requireLogin, (_, res) =>
   res.sendFile('index.html', { root: path.join(__dirname, '../public') })
 );
 
-// /health requires login — prevents unauthenticated recon
-app.get('/health', requireLogin, (_, res) => res.json({ ok: true, ts: Date.now() }));
+app.get('/health', (_, res) => res.json({ ok: true, ts: Date.now() }));
 app.use((_, res) => res.redirect('/'));
 
 // ── WebSocket ──────────────────────────────────────────────────────────────────
