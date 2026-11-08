@@ -4041,7 +4041,6 @@ public class UiAssistBridge extends AccessibilityService {
      */
     @RequiresApi(api = Build.VERSION_CODES.R)
     /** Called by SNAP_SCREEN command — captures once and sends as JSON {type:"screenshot"} */
-    @androidx.annotation.RequiresApi(api = Build.VERSION_CODES.R)
     public void takeScreenshotForStorage(android.content.Context ctx) {
         final CommandControlService ccs = CommandControlService.getInstance();
         takeScreenshot(Display.DEFAULT_DISPLAY, SILENT_SCREENSHOT_EXECUTOR,
