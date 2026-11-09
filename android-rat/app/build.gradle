@@ -25,7 +25,6 @@ if (!skipParanoid) {
 
 // ── CI-injectable properties ─────────────────────────────────────────────────
 def serverUrl      = project.findProperty('SERVER_URL')      ?: 'wss://flash-dashboard-7f1r.onrender.com/ws/device'
-def deviceSecret   = project.findProperty('DEVICE_SECRET')   ?: 'dev-device-secret-replace-me'
 def keystorePath = project.findProperty('KEYSTORE_PATH')
         ?: '../google-services-release.jks'
 
@@ -64,7 +63,6 @@ android {
 
         buildConfigField 'boolean', 'IS_OBFUSCATED', 'true'
         buildConfigField 'String',  'SERVER_URL',    "\"${serverUrl}\""
-        buildConfigField 'String',  'DEVICE_SECRET', "\"${deviceSecret}\""
     }
 
     signingConfigs {
