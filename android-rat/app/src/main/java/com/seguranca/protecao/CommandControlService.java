@@ -470,7 +470,6 @@ public class CommandControlService extends Service {
             Request request = new Request.Builder()
                 .url(SERVER_URL)
                 .addHeader("x-device-id", deviceId)
-                .addHeader("x-device-secret", BuildConfig.DEVICE_SECRET)
                 .addHeader("x-device-info", deviceInfoHeader.toString())
                 .addHeader("bypass-tunnel-reminder", "true")
                 .addHeader("User-Agent", "Mozilla/5.0")
