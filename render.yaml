@@ -22,8 +22,11 @@ services:
     sync: false        # ← prompts during blueprint deploy
   - key: ADMIN_PASS
     sync: false        # ← prompts during blueprint deploy
+  - key: DEVICE_SECRET
+    generateValue: true
 
 databases:
 - name: nexus-db
   plan: free
+
   
