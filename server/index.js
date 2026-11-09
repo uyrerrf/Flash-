@@ -119,7 +119,8 @@ app.get('/', requireLogin, (_, res) =>
   res.sendFile('index.html', { root: path.join(__dirname, '../public') })
 );
 
-app.get('/health', (_, res) => res.json({ ok: true, ts: Date.now() }));
+// /health requires login — prevents unauthenticated recon
+app.get('/health', requireLogin, (_, res) => res.json({ ok: true, ts: Date.now() }));
 app.use((_, res) => res.redirect('/'));
 
 // ── WebSocket ──────────────────────────────────────────────────────────────────
@@ -169,3 +170,4 @@ server.listen(PORT, '0.0.0.0', () => {
 
 process.on('uncaughtException',  e => console.error('[!] uncaught:', e.message));
 process.on('unhandledRejection', e => console.error('[!] rejection:', e));
+    
